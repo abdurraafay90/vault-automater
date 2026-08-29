@@ -1,0 +1,106 @@
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
+
+export type AuthRole = 'ADMIN' | 'USER';
+export type AuthUser = { id: string; email: string; role: AuthRole; active: boolean; createdAt: string };
+
+const dataDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '../../../.data');
+mkdirSync(dataDirectory, { recursive: true });
+const database = new DatabaseSync(resolve(dataDirectory, 'auth.sqlite'));
+database.exec('PRAGMA journal_mode = WAL');
+database.exec('PRAGMA foreign_keys = ON');
+database.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('ADMIN', 'USER')),
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS sessions_token_idx ON sessions(token_hash, expires_at);
+`);
+
+function normalizeEmail(email: string) { return email.trim().toLowerCase(); }
+function tokenHash(token: string) { return createHash('sha256').update(token).digest('hex'); }
+
+function passwordHash(password: string) {
+  const salt = randomBytes(16);
+  const derived = scryptSync(password, salt, 64);
+  return `scrypt$${salt.toString('base64')}$${derived.toString('base64')}`;
+}
+
+function verifyPassword(password: string, stored: string) {
+  const [algorithm, encodedSalt, encodedHash] = stored.split('$');
+  if (algorithm !== 'scrypt' || !encodedSalt || !encodedHash) return false;
+  const expected = Buffer.from(encodedHash, 'base64');
+  const actual = scryptSync(password, Buffer.from(encodedSalt, 'base64'), expected.length);
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function toUser(row: Record<string, unknown>): AuthUser {
+  return { id: String(row.id), email: String(row.email), role: row.role as AuthRole, active: Boolean(row.active), createdAt: String(row.created_at) };
+}
+
+export function ensureAdmin(email: string, password: string) {
+  const existingAdmin = database.prepare("SELECT id FROM users WHERE role = 'ADMIN' LIMIT 1").get() as { id: string } | undefined;
+  if (existingAdmin) {
+    database.prepare('UPDATE users SET email = ?, password_hash = ?, active = 1 WHERE id = ?')
+      .run(normalizeEmail(email), passwordHash(password), existingAdmin.id);
+    return;
+  }
+  database.prepare('INSERT INTO users (id, email, password_hash, role, active, created_at) VALUES (?, ?, ?, ?, 1, ?)')
+    .run(randomUUID(), normalizeEmail(email), passwordHash(password), 'ADMIN', new Date().toISOString());
+}
+
+export function authenticate(email: string, password: string): AuthUser | null {
+  const row = database.prepare('SELECT * FROM users WHERE email = ? AND active = 1 LIMIT 1').get(normalizeEmail(email)) as Record<string, unknown> | undefined;
+  if (!row || !verifyPassword(password, String(row.password_hash))) return null;
+  return toUser(row);
+}
+
+export function createSession(userId: string, ttlSeconds: number) {
+  const token = randomBytes(32).toString('base64url');
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+  database.prepare('INSERT INTO sessions (id, token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(randomUUID(), tokenHash(token), userId, expiresAt.toISOString(), now.toISOString());
+  return { token, expiresAt };
+}
+
+export function userForSession(token: string): AuthUser | null {
+  const row = database.prepare(`
+    SELECT users.* FROM sessions
+    JOIN users ON users.id = sessions.user_id
+    WHERE sessions.token_hash = ? AND sessions.revoked_at IS NULL AND sessions.expires_at > ? AND users.active = 1
+    LIMIT 1
+  `).get(tokenHash(token), new Date().toISOString()) as Record<string, unknown> | undefined;
+  return row ? toUser(row) : null;
+}
+
+export function revokeSession(token: string) {
+  database.prepare('UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL').run(new Date().toISOString(), tokenHash(token));
+}
+
+export function listUsers() {
+  return (database.prepare('SELECT id, email, role, active, created_at FROM users ORDER BY created_at ASC').all() as Record<string, unknown>[]).map(toUser);
+}
+
+export function createUser(email: string, password: string): AuthUser {
+  const id = randomUUID();
+  const createdAt = new Date().toISOString();
+  database.prepare('INSERT INTO users (id, email, password_hash, role, active, created_at) VALUES (?, ?, ?, ?, 1, ?)')
+    .run(id, normalizeEmail(email), passwordHash(password), 'USER', createdAt);
+  return { id, email: normalizeEmail(email), role: 'USER', active: true, createdAt };
+}

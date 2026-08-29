@@ -1,0 +1,49 @@
+diff --git a/apps/web/app/page.tsx b/apps/web/app/page.tsx
+--- a/apps/web/app/page.tsx
++++ b/apps/web/app/page.tsx
+@@
+-  function canStart(index: number) {
++  function canSend(index: number) {
+     const target = vaults[index];
+     return Boolean(manualSigner && target?.address && target.address !== 'Not configured' && hasValidRange(automations[index]));
+   }
+
++  function canAutomate(index: number) {
++    return sessionSource === 'private' && canSend(index);
++  }
++
+@@
+   function startAutomation(index: number) {
+     try {
+       if (automationsRef.current[index].mode !== 'automation') throw new Error('Select Automation mode first.');
+       getAmountRange(index);
+       if (!signerRef.current) throw new Error('Unlock the private-key session first.');
++      if (sessionSource !== 'private') {
++        throw new Error('Automation requires the Private Key session. Keplr requires approval for every transaction.');
++      }
+       const target = vaultsRef.current[index];
+       if (!target?.address || target.address === 'Not configured') throw new Error('This vault address is not configured.');
+       clearVaultTimer(index);
+       patchAutomation(index, { status: 'running', nextAt: unixNow() });
+       setTransferStatus(null);
+       void runAutomationCycle(index);
+@@
+-  function startAll() { automationsRef.current.forEach((item, index) => item.mode === 'automation' && startAutomation(index)); }
++  function startAll() {
++    automationsRef.current.forEach((item, index) => {
++      if (item.mode === 'automation' && canAutomate(index)) startAutomation(index);
++    });
++  }
+@@
+-  const allReady = automatedVaultIndexes.length > 0 && automatedVaultIndexes.every((index) => canStart(index));
++  const allReady = automatedVaultIndexes.length > 0 && automatedVaultIndexes.every((index) => canAutomate(index));
+   const actionHint = !sessionSource ? 'Connect a wallet to enable transfers.'
+     : !manualSigner ? 'The connected wallet does not expose a transaction signer.'
++    : automation.mode === 'automation' && sessionSource === 'browser' ? 'Keplr asks for approval on every transaction. Use the Private Key tab once to unlock automatic signing for this browser session.'
+     : !vault.address || vault.address === 'Not configured' ? 'Configure this vault address first.'
+     : !automation.minimum.trim() ? 'Enter an amount to enable the transfer button.'
+     : !hasValidRange(automation) ? automation.mode === 'automation' ? 'Check the amount range and use a frequency of at least 5 seconds.' : 'Enter a valid ZIG amount.'
+     : '';
+@@
+-          <div className="execution-strip"><div><span className={`execution-light ${automation.status}`} /><span><small>CURRENT STATUS</small><strong>{sendingVaults.includes(selectedVault) ? 'SENDING' : automation.mode === 'once' ? 'READY' : statusLabel}</strong></span></div><div><small>LAST EXECUTION</small><strong>{automation.lastAt ? new Date(automation.lastAt).toLocaleTimeString() : 'Never'}</strong></div><div><small>NEXT EXECUTION</small><strong>{automation.mode === 'once' ? 'Not scheduled' : automation.status === 'running' ? formatCountdown(automation.nextAt, now) : '—'}</strong></div><div className="strategy-actions">{automation.mode === 'once' ? <button className="manual-send primary-action" type="button" onClick={sendManualTransfer} disabled={!canStart(selectedVault) || sendingVaults.includes(selectedVault)}>SEND ONCE</button> : <><button type="button" onClick={() => pauseAutomation(selectedVault)} disabled={automation.status !== 'running'}>PAUSE</button><button className="danger" type="button" onClick={() => stopAutomation(selectedVault)} disabled={automation.status === 'stopped'}>STOP</button><button className="start" type="button" onClick={() => startAutomation(selectedVault)} disabled={!canStart(selectedVault) || automation.status === 'running'}>{automation.status === 'paused' ? 'RESUME' : 'START AUTOMATION'}</button></>}</div></div>
++          <div className="execution-strip"><div><span className={`execution-light ${automation.status}`} /><span><small>CURRENT STATUS</small><strong>{sendingVaults.includes(selectedVault) ? 'SENDING' : automation.mode === 'once' ? 'READY' : statusLabel}</strong></span></div><div><small>LAST EXECUTION</small><strong>{automation.lastAt ? new Date(automation.lastAt).toLocaleTimeString() : 'Never'}</strong></div><div><small>NEXT EXECUTION</small><strong>{automation.mode === 'once' ? 'Not scheduled' : automation.status === 'running' ? formatCountdown(automation.nextAt, now) : '—'}</strong></div><div className="strategy-actions">{automation.mode === 'once' ? <button className="manual-send primary-action" type="button" onClick={sendManualTransfer} disabled={!canSend(selectedVault) || sendingVaults.includes(selectedVault)}>SEND ONCE</button> : <><button type="button" onClick={() => pauseAutomation(selectedVault)} disabled={automation.status !== 'running'}>PAUSE</button><button className="danger" type="button" onClick={() => stopAutomation(selectedVault)} disabled={automation.status === 'stopped'}>STOP</button><button className="start" type="button" onClick={() => startAutomation(selectedVault)} disabled={!canAutomate(selectedVault) || automation.status === 'running'}>{automation.status === 'paused' ? 'RESUME' : 'START AUTOMATION'}</button></>}</div></div>

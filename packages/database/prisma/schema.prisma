@@ -1,0 +1,200 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  USER
+}
+
+enum WalletMode {
+  BROWSER_WALLET
+  MANUAL_INTERACTIVE
+  BACKEND_MANAGED
+}
+
+enum AutomationStatus {
+  STOPPED
+  STARTING
+  RUNNING
+  PAUSED
+  WAITING
+  SUBMITTING
+  WAITING_FOR_CONFIRMATION
+  SUCCESS
+  INSUFFICIENT_BALANCE
+  INSUFFICIENT_GAS
+  ERROR
+}
+
+enum TransactionStatus {
+  SCHEDULED
+  PREPARING
+  SIMULATING
+  AWAITING_SIGNATURE
+  SIGNED
+  BROADCAST
+  BROADCAST_UNKNOWN
+  CONFIRMING
+  SUCCESS
+  FAILED
+  REVERTED
+  DROPPED
+}
+
+model User {
+  id           String             @id @default(cuid())
+  email        String             @unique
+  passwordHash String
+  role         Role               @default(USER)
+  active       Boolean            @default(true)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  sessions     Session[]
+  automations  AutomationConfig[]
+  auditLogs    AuditLog[]
+}
+
+model Session {
+  id         String    @id @default(cuid())
+  tokenHash  String    @unique
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  lastSeenAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId, expiresAt])
+}
+
+model Wallet {
+  id           String                  @id @default(cuid())
+  chainKey     String
+  address      String
+  mode         WalletMode
+  label        String?
+  active       Boolean                 @default(true)
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+  automations  AutomationConfig[]
+  transactions BlockchainTransaction[]
+
+  @@unique([chainKey, address])
+}
+
+model Vault {
+  id              String                  @id @default(cuid())
+  key             String                  @unique
+  name            String
+  address         String
+  chainKey        String
+  enabled         Boolean                 @default(true)
+  interfaceStatus String                  @default("VAULT_INTERFACE_NOT_CONFIGURED")
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+  automation      AutomationConfig?
+  transactions    BlockchainTransaction[]
+}
+
+model AutomationConfig {
+  id                     String                @id @default(cuid())
+  vaultId                String                @unique
+  vault                  Vault                 @relation(fields: [vaultId], references: [id])
+  walletId               String
+  wallet                  Wallet                @relation(fields: [walletId], references: [id])
+  userId                  String
+  user                    User                  @relation(fields: [userId], references: [id])
+  enabled                 Boolean               @default(false)
+  status                  AutomationStatus      @default(STOPPED)
+  minAmountBaseUnits      String
+  maxAmountBaseUnits      String
+  intervalSeconds         Int
+  generation              Int                   @default(0)
+  totalExecutedBaseUnits  String                @default("0")
+  lastExecutionAt         DateTime?
+  nextExecutionAt         DateTime?
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+  executions              AutomationExecution[]
+}
+
+model AutomationExecution {
+  id                      String                  @id @default(cuid())
+  automationConfigId      String
+  automation              AutomationConfig        @relation(fields: [automationConfigId], references: [id])
+  scheduledFor            DateTime
+  idempotencyKey          String                  @unique
+  attempt                 Int                     @default(0)
+  state                   TransactionStatus       @default(SCHEDULED)
+  selectedAmountBaseUnits String?
+  errorCode               String?
+  safeErrorMessage        String?
+  startedAt               DateTime?
+  finishedAt              DateTime?
+  createdAt               DateTime                @default(now())
+  transaction             BlockchainTransaction?
+
+  @@index([automationConfigId, scheduledFor])
+}
+
+model BlockchainTransaction {
+  id                       String              @id @default(cuid())
+  executionId              String              @unique
+  execution                AutomationExecution @relation(fields: [executionId], references: [id])
+  vaultId                  String
+  vault                    Vault               @relation(fields: [vaultId], references: [id])
+  walletId                 String
+  wallet                   Wallet              @relation(fields: [walletId], references: [id])
+  chainId                  String
+  walletAddress            String
+  vaultAddress             String
+  tokenAddress             String
+  requestedAmountBaseUnits String
+  executedAmountBaseUnits  String?
+  hash                     String?             @unique
+  status                   TransactionStatus
+  blockNumber              String?
+  gasUsed                  String?
+  feeBaseUnits             String?
+  nonceOrSequence          String?
+  errorCode                String?
+  safeErrorMessage         String?
+  submittedAt              DateTime?
+  confirmedAt              DateTime?
+  createdAt                DateTime            @default(now())
+
+  @@index([walletId, vaultId, createdAt(sort: Desc)])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorUserId String?
+  actor       User?    @relation(fields: [actorUserId], references: [id])
+  action      String
+  targetType  String?
+  targetId    String?
+  metadataJson Json?
+  requestId   String?
+  ipHash      String?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+}
+
+model OutboxEvent {
+  id            String    @id @default(cuid())
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  payloadJson   Json
+  createdAt     DateTime  @default(now())
+  publishedAt   DateTime?
+
+  @@index([publishedAt, createdAt])
+}

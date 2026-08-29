@@ -1,0 +1,12 @@
+{
+  "name": "@vaultflow/blockchain-cosmos",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": { "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": {
+    "@cosmjs/proto-signing": "0.39.0",
+    "@cosmjs/stargate": "0.39.0"
+  },
+  "devDependencies": { "typescript": "7.0.2" }
+}

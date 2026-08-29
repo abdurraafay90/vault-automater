@@ -1,0 +1,9 @@
+{
+  "name": "@vaultflow/shared",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": { "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": { "zod": "4.4.3" },
+  "devDependencies": { "@types/node": "22.19.19", "typescript": "7.0.2" }
+}

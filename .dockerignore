@@ -1,0 +1,16 @@
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/.vinext
+**/.wrangler
+.data
+.git
+.env
+.env.*
+!.env.example
+*.log
+**/coverage
+project_context.txt
+collect_code_context.py
+copycode.py

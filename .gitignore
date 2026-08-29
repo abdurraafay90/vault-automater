@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.next/
+.vinext/
+.wrangler/
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+.data/
+.DS_Store
+Thumbs.db
