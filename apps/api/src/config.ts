@@ -10,7 +10,7 @@ if (process.env.NODE_ENV !== 'production') {
 
 const environmentSchema = z.object({
   API_PORT: z.coerce.number().int().positive().default(4000),
-  APP_ORIGIN: z.url().default('http://localhost:3001'),
+  APP_ORIGIN: z.url().default('http://localhost:4560'),
   CHAIN_TYPE: z.enum(['evm', 'cosmos-sdk', 'cosmwasm', 'other']).optional(),
   CHAIN_NAME: z.string().min(1).default('ZIGChain Testnet'),
   CHAIN_ID: z.string().min(1).default('zig-test-2'),
@@ -28,7 +28,7 @@ const environmentSchema = z.object({
   VAULT_3_ADDRESS: z.string().optional().default(''),
   BACKEND_SIGNER_ENABLED: z.stringbool().default(false),
   ADMIN_EMAIL: z.email(),
-  ADMIN_PASSWORD: z.string().min(8),
+  ADMIN_PASSWORD: z.string().min(1),
   SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(28_800),
 });
 

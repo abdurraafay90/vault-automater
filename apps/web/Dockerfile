@@ -37,5 +37,5 @@ COPY --from=build /repo/packages/shared ./packages/shared
 COPY --from=build /repo/apps/web ./apps/web
 
 WORKDIR /repo/apps/web
-EXPOSE 3000
+EXPOSE 4560
 CMD ["npm", "run", "start"]

@@ -20,6 +20,8 @@ type Automation = { mode: DeliveryMode; minimum: string; maximum: string; interv
 type HistoryStatus = 'Pending' | 'Success' | 'Failed';
 type HistoryEntry = { id: string; vaultIndex: number; time: number; amountBaseUnits: bigint; status: HistoryStatus; hash?: string; error?: string; source: 'Manual' | 'Automation' | 'Chain' };
 type AuthUser = { id: string; email: string; role: 'ADMIN' | 'USER'; active: boolean; createdAt: string };
+// Each vault tab owns its own signer, address, and balance — vaults are never forced to share one wallet.
+type WalletSession = { mode: 'wallet' | 'private'; source: SessionSource | null; address: string; manualAddress: string; balanceBaseUnits: string; error: string; connecting: boolean; unlocking: boolean; hasSigner: boolean };
 
 const chain = { chainId: 'zig-test-2', chainName: 'ZIGChain Testnet', rpc: 'https://testnet-rpc.zigchain.com', rest: 'https://testnet-api.zigchain.com' };
 const defaultVaults: Vault[] = [
@@ -78,6 +80,10 @@ function initialAutomations(): Automation[] {
   return defaultVaults.map(() => ({ mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null }));
 }
 
+function initialWalletSessions(): WalletSession[] {
+  return defaultVaults.map(() => ({ mode: 'wallet', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false }));
+}
+
 function unixNow() { return Date.now(); }
 
 function hasValidRange(settings: Automation) {
@@ -95,17 +101,9 @@ export default function Home() {
   const [vaults, setVaults] = useState<Vault[]>(defaultVaults);
   const [automations, setAutomations] = useState<Automation[]>(initialAutomations);
   const [selectedVault, setSelectedVault] = useState(0);
-  const [walletMode, setWalletMode] = useState<'wallet' | 'private'>('wallet');
+  const [walletSessions, setWalletSessions] = useState<WalletSession[]>(initialWalletSessions);
   const [historyFilter, setHistoryFilter] = useState('All');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [walletAddress, setWalletAddress] = useState('');
-  const [sessionSource, setSessionSource] = useState<SessionSource | null>(null);
-  const [balanceBaseUnits, setBalanceBaseUnits] = useState('0');
-  const [walletError, setWalletError] = useState('');
-  const [connecting, setConnecting] = useState(false);
-  const [manualAddress, setManualAddress] = useState('');
-  const [manualSigner, setManualSigner] = useState<OfflineSigner | null>(null);
-  const [unlocking, setUnlocking] = useState(false);
   const [sendingVaults, setSendingVaults] = useState<number[]>([]);
   const [transferStatus, setTransferStatus] = useState<{ kind: 'success' | 'error'; message: string; hash?: string } | null>(null);
   const [now, setNow] = useState(unixNow);
@@ -124,15 +122,17 @@ export default function Home() {
   const [copiedHash, setCopiedHash] = useState('');
 
   const secretInputRef = useRef<HTMLInputElement>(null);
-  const signerRef = useRef<OfflineSigner | null>(null);
+  const signersRef = useRef<Array<OfflineSigner | null>>([null, null, null]);
+  const walletSessionsRef = useRef<WalletSession[]>(walletSessions);
   const vaultsRef = useRef<Vault[]>(defaultVaults);
   const automationsRef = useRef<Automation[]>(automations);
   const timersRef = useRef<Array<ReturnType<typeof setTimeout> | null>>([null, null, null]);
-  const transferQueueRef = useRef<Promise<boolean>>(Promise.resolve(true));
-  const sessionGenerationRef = useRef(0);
+  const transferQueueRef = useRef<Array<Promise<boolean>>>([Promise.resolve(true), Promise.resolve(true), Promise.resolve(true)]);
+  const sessionGenerationRef = useRef<number[]>([0, 0, 0]);
 
   const vault = vaults[selectedVault];
   const automation = automations[selectedVault];
+  const walletSession = walletSessions[selectedVault];
   const selectedHistory = useMemo(() => history.filter((entry) => entry.vaultIndex === selectedVault && (historyFilter === 'All' || entry.status === historyFilter)), [history, historyFilter, selectedVault]);
   const successfulHistory = history.filter((entry) => entry.vaultIndex === selectedVault && entry.status === 'Success');
   const totalTransferred = successfulHistory.reduce((sum, entry) => sum + entry.amountBaseUnits, 0n);
@@ -170,6 +170,12 @@ export default function Home() {
     setAutomations(next);
   }
 
+  function patchWalletSession(index: number, patch: Partial<WalletSession>) {
+    const next = walletSessionsRef.current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
+    walletSessionsRef.current = next;
+    setWalletSessions(next);
+  }
+
   function clearVaultTimer(index: number) {
     const timer = timersRef.current[index];
     if (timer) clearTimeout(timer);
@@ -185,14 +191,14 @@ export default function Home() {
     setVaults(configured);
   }
 
-  async function loadBalance(address: string, generation = sessionGenerationRef.current) {
+  async function loadBalance(index: number, address: string, generation = sessionGenerationRef.current[index]) {
     const response = await apiRequest(`/api/wallet/${encodeURIComponent(address)}/balance`);
     if (!response.ok) throw new Error('Wallet opened, but the ZIG balance could not be loaded.');
     const balance = await response.json() as { amountBaseUnits: string };
-    if (generation === sessionGenerationRef.current) setBalanceBaseUnits(balance.amountBaseUnits);
+    if (generation === sessionGenerationRef.current[index]) patchWalletSession(index, { balanceBaseUnits: balance.amountBaseUnits });
   }
 
-  async function loadHistory(address: string, generation = sessionGenerationRef.current) {
+  async function loadHistory(index: number, address: string, generation = sessionGenerationRef.current[index]) {
     try {
       const response = await apiRequest(`/api/wallet/${encodeURIComponent(address)}/transactions?limit=50`);
       if (!response.ok) return;
@@ -208,7 +214,7 @@ export default function Home() {
           hash: transaction.hash,
           source: 'Chain',
         }));
-      if (generation !== sessionGenerationRef.current) return;
+      if (generation !== sessionGenerationRef.current[index]) return;
       setHistory((current) => {
         const chainHashes = new Set(chainHistory.map((entry) => entry.hash));
         const localOnly = current.filter((entry) => !entry.hash || !chainHashes.has(entry.hash));
@@ -219,10 +225,9 @@ export default function Home() {
     }
   }
 
-  async function connectKeplr() {
-    const generation = sessionGenerationRef.current;
-    setConnecting(true);
-    setWalletError('');
+  async function connectKeplr(index: number) {
+    const generation = sessionGenerationRef.current[index];
+    patchWalletSession(index, { connecting: true, error: '' });
     try {
       const browserWallet = window as BrowserWalletWindow;
       const keplr = browserWallet.keplr;
@@ -243,24 +248,21 @@ export default function Home() {
       if (!signer) throw new Error('Keplr connected, but its transaction signer is unavailable. Refresh the extension and try again.');
       const [signerAccount] = await signer.getAccounts();
       if (!signerAccount || signerAccount.address !== key.bech32Address) throw new Error('Keplr returned a signer for a different account.');
-      await loadBalance(key.bech32Address, generation);
-      if (generation !== sessionGenerationRef.current) return;
-      signerRef.current = signer;
-      setManualSigner(signer);
-      setWalletAddress(key.bech32Address);
-      setSessionSource('browser');
-      void loadHistory(key.bech32Address, generation);
+      await loadBalance(index, key.bech32Address, generation);
+      if (generation !== sessionGenerationRef.current[index]) return;
+      signersRef.current[index] = signer;
+      patchWalletSession(index, { source: 'browser', address: key.bech32Address, hasSigner: true });
+      void loadHistory(index, key.bech32Address, generation);
     } catch (error) {
-      setWalletError(error instanceof Error ? error.message : 'Wallet connection failed.');
+      patchWalletSession(index, { error: error instanceof Error ? error.message : 'Wallet connection failed.' });
     } finally {
-      setConnecting(false);
+      patchWalletSession(index, { connecting: false });
     }
   }
 
-  async function unlockManualSession() {
-    const generation = sessionGenerationRef.current;
-    setUnlocking(true);
-    setWalletError('');
+  async function unlockManualSession(index: number) {
+    const generation = sessionGenerationRef.current[index];
+    patchWalletSession(index, { unlocking: true, error: '' });
     setTransferStatus(null);
     try {
       const secret = secretInputRef.current?.value.trim() ?? '';
@@ -270,22 +272,19 @@ export default function Home() {
         : await DirectSecp256k1Wallet.fromKey(hexToBytes(secret), 'zig');
       const [account] = await signer.getAccounts();
       if (!account) throw new Error('No wallet account could be derived.');
-      if (manualAddress.trim() && manualAddress.trim() !== account.address) throw new Error(`The secret belongs to ${account.address}, not the entered address.`);
-      await loadBalance(account.address, generation);
-      if (generation !== sessionGenerationRef.current) return;
-      signerRef.current = signer;
-      setManualSigner(signer);
-      setManualAddress(account.address);
-      setWalletAddress(account.address);
-      setSessionSource('private');
-      void loadHistory(account.address, generation);
+      const expectedAddress = walletSessionsRef.current[index].manualAddress.trim();
+      if (expectedAddress && expectedAddress !== account.address) throw new Error(`The secret belongs to ${account.address}, not the entered address.`);
+      await loadBalance(index, account.address, generation);
+      if (generation !== sessionGenerationRef.current[index]) return;
+      signersRef.current[index] = signer;
+      patchWalletSession(index, { source: 'private', address: account.address, manualAddress: account.address, hasSigner: true });
+      void loadHistory(index, account.address, generation);
       if (secretInputRef.current) secretInputRef.current.value = '';
     } catch (error) {
-      signerRef.current = null;
-      setManualSigner(null);
-      setWalletError(error instanceof Error ? error.message : 'Could not unlock this wallet.');
+      signersRef.current[index] = null;
+      patchWalletSession(index, { hasSigner: false, error: error instanceof Error ? error.message : 'Could not unlock this wallet.' });
     } finally {
-      setUnlocking(false);
+      patchWalletSession(index, { unlocking: false });
     }
   }
 
@@ -313,31 +312,31 @@ export default function Home() {
     setAutomations(next);
   }
 
-  function clearWalletSession() {
-    stopAll();
-    sessionGenerationRef.current += 1;
-    signerRef.current = null;
-    setManualSigner(null);
-    setSessionSource(null);
-    setManualAddress('');
-    setWalletAddress('');
-    setBalanceBaseUnits('0');
-    setHistory([]);
-    setSendingVaults([]);
-    setWalletError('');
-    setTransferStatus(null);
+  function clearWalletSession(index: number) {
+    stopAutomation(index);
+    sessionGenerationRef.current[index] += 1;
+    signersRef.current[index] = null;
+    patchWalletSession(index, { source: null, address: '', manualAddress: '', balanceBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false });
+    setHistory((current) => current.filter((entry) => entry.vaultIndex !== index));
+    setSendingVaults((current) => current.filter((item) => item !== index));
+    if (selectedVault === index) setTransferStatus(null);
     if (secretInputRef.current) secretInputRef.current.value = '';
   }
 
-  async function disconnectWallet() {
-    const disconnectedSource = sessionSource;
-    clearWalletSession();
+  async function disconnectWallet(index: number) {
+    const disconnectedSource = walletSessionsRef.current[index].source;
+    clearWalletSession(index);
     if (disconnectedSource === 'browser') {
-      try {
-        const keplr = (window as typeof window & { keplr?: KeplrProvider }).keplr;
-        await keplr?.disable?.(chain.chainId);
-      } catch {
-        // The local app session is cleared even when the extension does not expose permission revocation.
+      // Keplr's enable/disable is global to the extension, not per-tab — only revoke it
+      // once no other vault tab is still relying on a browser-wallet session.
+      const stillUsingBrowser = walletSessionsRef.current.some((session, i) => i !== index && session.source === 'browser');
+      if (!stillUsingBrowser) {
+        try {
+          const keplr = (window as typeof window & { keplr?: KeplrProvider }).keplr;
+          await keplr?.disable?.(chain.chainId);
+        } catch {
+          // The local app session is cleared even when the extension does not expose permission revocation.
+        }
       }
     }
   }
@@ -365,7 +364,7 @@ export default function Home() {
   }
 
   async function handleLogout() {
-    await disconnectWallet();
+    await Promise.all(defaultVaults.map((_, index) => disconnectWallet(index)));
     try { await apiRequest('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch { /* Local state is still cleared. */ }
     const resetAutomations = initialAutomations();
     automationsRef.current = resetAutomations;
@@ -432,16 +431,17 @@ export default function Home() {
 
   function canSend(index: number) {
     const target = vaults[index];
-    return Boolean(manualSigner && target?.address && target.address !== 'Not configured' && hasValidRange(automations[index]));
+    const session = walletSessions[index];
+    return Boolean(session?.hasSigner && target?.address && target.address !== 'Not configured' && hasValidRange(automations[index]));
   }
 
   function canAutomate(index: number) {
-    return sessionSource === 'private' && canSend(index);
+    return walletSessions[index]?.source === 'private' && canSend(index);
   }
 
   async function executeTransfer(index: number, amount: bigint, source: 'Manual' | 'Automation'): Promise<boolean> {
-    const generation = sessionGenerationRef.current;
-    const signer = signerRef.current;
+    const generation = sessionGenerationRef.current[index];
+    const signer = signersRef.current[index];
     const target = vaultsRef.current[index];
     if (!signer || !target?.address || target.address === 'Not configured') {
       setTransferStatus({ kind: 'error', message: 'Unlock the signer and configure the vault address first.' });
@@ -456,33 +456,33 @@ export default function Home() {
     try {
       const [account] = await signer.getAccounts();
       if (!account) throw new Error('Signer account is unavailable.');
-      if (generation !== sessionGenerationRef.current) return false;
+      if (generation !== sessionGenerationRef.current[index]) return false;
       client = await SigningStargateClient.connectWithSigner(chain.rpc, signer, { gasPrice: GasPrice.fromString('0.025uzig') });
-      if (generation !== sessionGenerationRef.current) return false;
+      if (generation !== sessionGenerationRef.current[index]) return false;
       const result = await client.sendTokens(account.address, target.address, [coin(amount.toString(), 'uzig')], GAS_MULTIPLIER, `Vaultflow ${source.toLowerCase()} · ${target.pair}`);
       if (result.code !== 0) throw new Error(result.rawLog || `Transaction failed with code ${result.code}.`);
-      if (generation !== sessionGenerationRef.current) return true;
+      if (generation !== sessionGenerationRef.current[index]) return true;
       setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Success', hash: result.transactionHash } : item));
       setTransferStatus({ kind: 'success', message: `${formatBaseUnits(amount)} ZIG sent to ${target.name}.`, hash: result.transactionHash });
-      try { await loadBalance(account.address, generation); } catch { /* The confirmed transfer remains successful if balance refresh is temporarily unavailable. */ }
+      try { await loadBalance(index, account.address, generation); } catch { /* The confirmed transfer remains successful if balance refresh is temporarily unavailable. */ }
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Transfer failed.';
-      if (generation === sessionGenerationRef.current) {
+      if (generation === sessionGenerationRef.current[index]) {
         setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Failed', error: message } : item));
         setTransferStatus({ kind: 'error', message });
       }
       return false;
     } finally {
       client?.disconnect();
-      if (generation === sessionGenerationRef.current) setSendingVaults((current) => current.filter((item) => item !== index));
+      if (generation === sessionGenerationRef.current[index]) setSendingVaults((current) => current.filter((item) => item !== index));
     }
   }
 
   function enqueueTransfer(index: number, amount: bigint, source: 'Manual' | 'Automation') {
     const run = () => source === 'Automation' && automationsRef.current[index].status !== 'running' ? Promise.resolve(false) : executeTransfer(index, amount, source);
-    const task = transferQueueRef.current.then(run, run);
-    transferQueueRef.current = task;
+    const task = transferQueueRef.current[index].then(run, run);
+    transferQueueRef.current[index] = task;
     return task;
   }
 
@@ -515,8 +515,8 @@ export default function Home() {
     try {
       if (automationsRef.current[index].mode !== 'automation') throw new Error('Select Automation mode first.');
       getAmountRange(index);
-      if (!signerRef.current) throw new Error('Unlock the private-key session first.');
-      if (sessionSource !== 'private') {
+      if (!signersRef.current[index]) throw new Error('Unlock the private-key session first.');
+      if (walletSessionsRef.current[index].source !== 'private') {
         throw new Error('Automation requires the Private Key session. Keplr requires approval for every transaction.');
       }
       const target = vaultsRef.current[index];
@@ -562,9 +562,9 @@ export default function Home() {
   const statusLabel = automation.status.toUpperCase();
   const automatedVaultIndexes = automations.map((item, index) => item.mode === 'automation' ? index : -1).filter((index) => index >= 0);
   const allReady = automatedVaultIndexes.length > 0 && automatedVaultIndexes.every((index) => canAutomate(index));
-  const actionHint = !sessionSource ? 'Connect a wallet to enable transfers.'
-    : !manualSigner ? 'The connected wallet does not expose a transaction signer.'
-    : automation.mode === 'automation' && sessionSource === 'browser' ? 'Keplr asks for approval on every transaction. Use the Private Key tab once to unlock automatic signing for this browser session.'
+  const actionHint = !walletSession.source ? 'Connect a wallet to enable transfers.'
+    : !walletSession.hasSigner ? 'The connected wallet does not expose a transaction signer.'
+    : automation.mode === 'automation' && walletSession.source === 'browser' ? 'Keplr asks for approval on every transaction. Use the Private Key tab once to unlock automatic signing for this browser session.'
     : !vault.address || vault.address === 'Not configured' ? 'Configure this vault address first.'
     : !automation.minimum.trim() ? 'Enter an amount to enable the transfer button.'
     : !hasValidRange(automation) ? automation.mode === 'automation' ? 'Check the amount range and use a frequency of at least 5 seconds.' : 'Enter a valid ZIG amount.'
@@ -592,7 +592,7 @@ export default function Home() {
     <main className="console-shell">
       <nav className="vault-nav" aria-label="Vault selection">
         <div className="nav-brand"><span className="brand-glyph">V</span><span>Vaultflow</span></div>
-        <div className="pair-tabs" role="tablist">{vaults.map((item, index) => <button key={item.pair} className={`pair-tab ${selectedVault === index ? 'active' : ''}`} type="button" role="tab" aria-selected={selectedVault === index} onClick={() => setSelectedVault(index)}><span>{item.name}</span><span className={`pair-dot ${item.accent}`} /></button>)}</div>
+        <div className="pair-tabs" role="tablist">{vaults.map((item, index) => <button key={item.pair} className={`pair-tab ${selectedVault === index ? 'active' : ''}`} type="button" role="tab" aria-selected={selectedVault === index} onClick={() => setSelectedVault(index)}><span>{item.name}</span>{walletSessions[index].source && <span className="connected-mini" title="Wallet connected">●</span>}<span className={`pair-dot ${item.accent}`} /></button>)}</div>
         <div className="account-tools"><span className="account-identity"><b>{authUser.email.slice(0, 2).toUpperCase()}</b><span><strong>{authUser.email}</strong><small>{authUser.role}</small></span></span>{authUser.role === 'ADMIN' && <button type="button" onClick={() => void openUserManagement()}>USERS</button>}<button className="logout-button" type="button" onClick={() => void handleLogout()}>LOGOUT</button></div>
       </nav>
 
@@ -601,7 +601,7 @@ export default function Home() {
       <div className="console-content">
         <header className="vault-hero">
           <div className="hero-title"><p><span className={`pulse ${vault.accent}`} /> {vault.pair} — VAULT AUTOMATION CONSOLE</p><h1><span>ZIG</span><b>→</b>{vault.name}</h1></div>
-          <div className="hero-status"><span className="state-pill"><i /> TIMER READY</span><span className={`state-pill ${automation.status}`}>{statusLabel}</span><button type="button" onClick={() => void disconnectWallet()} disabled={!sessionSource}>DISCONNECT</button></div>
+          <div className="hero-status"><span className="state-pill"><i /> TIMER READY</span><span className={`state-pill ${automation.status}`}>{statusLabel}</span><button type="button" onClick={() => void disconnectWallet(selectedVault)} disabled={!walletSession.source}>DISCONNECT</button></div>
         </header>
 
         <section className="global-bar">
@@ -611,19 +611,19 @@ export default function Home() {
 
         <section className="two-column">
           <article className="console-card wallet-card">
-            <div className="card-title"><span className="title-icon blue">▣</span><div><h2>Wallet Access</h2><p>Choose how transactions are signed.</p></div></div>
-            <div className="mode-switch" role="tablist" aria-label="Wallet mode"><button className={walletMode === 'wallet' ? 'active' : ''} type="button" onClick={() => setWalletMode('wallet')}>BROWSER WALLET {sessionSource === 'browser' && <span className="connected-mini">CONNECTED</span>}</button><button className={walletMode === 'private' ? 'active' : ''} type="button" onClick={() => setWalletMode('private')}>PRIVATE KEY {sessionSource === 'private' && <span className="connected-mini">CONNECTED</span>}</button></div>
-            {sessionSource ? (
+            <div className="card-title"><span className="title-icon blue">▣</span><div><h2>Wallet Access</h2><p>Each vault tab keeps its own wallet connection.</p></div></div>
+            <div className="mode-switch" role="tablist" aria-label="Wallet mode"><button className={walletSession.mode === 'wallet' ? 'active' : ''} type="button" onClick={() => patchWalletSession(selectedVault, { mode: 'wallet' })}>BROWSER WALLET {walletSession.source === 'browser' && <span className="connected-mini">CONNECTED</span>}</button><button className={walletSession.mode === 'private' ? 'active' : ''} type="button" onClick={() => patchWalletSession(selectedVault, { mode: 'private' })}>PRIVATE KEY {walletSession.source === 'private' && <span className="connected-mini">CONNECTED</span>}</button></div>
+            {walletSession.source ? (
               <div className="connection-panel">
-                <div className="connection-heading"><span className="connection-mark">✓</span><div><small>ACTIVE CONNECTION</small><h3>{sessionSource === 'browser' ? 'Browser wallet connected' : 'Private-key session connected'}</h3></div><span className="connection-method">{sessionSource === 'browser' ? 'KEPLR' : 'PRIVATE KEY'}</span></div>
-                <div className="connected-account"><span>WALLET ADDRESS</span><code>{walletAddress}</code><span>BALANCE</span><strong>{formatBaseUnits(balanceBaseUnits)} ZIG</strong></div>
-                <p>{walletMode === 'wallet' && sessionSource === 'private' ? 'This wallet was connected from the Private Key tab.' : walletMode === 'private' && sessionSource === 'browser' ? 'This wallet was connected from the Browser Wallet tab. No private key was entered.' : 'This connection is active across both wallet tabs.'}</p>
-                <button className="disconnect-button" type="button" onClick={() => void disconnectWallet()}>DISCONNECT & CLEAR WALLET DATA</button>
+                <div className="connection-heading"><span className="connection-mark">✓</span><div><small>ACTIVE CONNECTION · {vault.pair}</small><h3>{walletSession.source === 'browser' ? 'Browser wallet connected' : 'Private-key session connected'}</h3></div><span className="connection-method">{walletSession.source === 'browser' ? 'KEPLR' : 'PRIVATE KEY'}</span></div>
+                <div className="connected-account"><span>WALLET ADDRESS</span><code>{walletSession.address}</code><span>BALANCE</span><strong>{formatBaseUnits(walletSession.balanceBaseUnits)} ZIG</strong></div>
+                <p>This connection only applies to {vault.name}. Select another vault tab to connect a different wallet.</p>
+                <button className="disconnect-button" type="button" onClick={() => void disconnectWallet(selectedVault)}>DISCONNECT & CLEAR WALLET DATA</button>
               </div>
-            ) : walletMode === 'wallet' ? (
-              <div className="wallet-connect"><span className="wallet-orbit"><i /><b>◈</b></span><h3>Connect a browser wallet</h3><p>Connect Keplr to load the wallet address, balance, and confirmed vault transactions.</p><button type="button" onClick={connectKeplr} disabled={connecting}>{connecting ? 'CONNECTING…' : 'CONNECT KEPLR'} <span>→</span></button><small>{walletError || 'ZIGChain Testnet · chain ID zig-test-2'}</small></div>
+            ) : walletSession.mode === 'wallet' ? (
+              <div className="wallet-connect"><span className="wallet-orbit"><i /><b>◈</b></span><h3>Connect a browser wallet</h3><p>Connect Keplr to load the wallet address, balance, and confirmed vault transactions for {vault.name}.</p><button type="button" onClick={() => void connectKeplr(selectedVault)} disabled={walletSession.connecting}>{walletSession.connecting ? 'CONNECTING…' : 'CONNECT KEPLR'} <span>→</span></button><small>{walletSession.error || 'ZIGChain Testnet · chain ID zig-test-2'}</small></div>
             ) : (
-              <div className="private-form"><label><span>WALLET ADDRESS (OPTIONAL VERIFICATION)</span><input value={manualAddress} onChange={(event) => setManualAddress(event.target.value)} placeholder="zig1…" autoComplete="off" spellCheck={false} /></label><label><span>PRIVATE KEY / MNEMONIC</span><input ref={secretInputRef} type="password" placeholder="32-byte hex key or 12/24-word mnemonic" autoComplete="new-password" spellCheck={false} /></label><div className="warning-note"><b>!</b><p><strong>Browser-session automation only.</strong> The signer stays in memory and all loops stop when you disconnect, refresh, close, or suspend this tab.</p></div><button className="unlock-button" type="button" onClick={unlockManualSession} disabled={unlocking}>{unlocking ? 'UNLOCKING…' : 'UNLOCK SESSION'}</button>{walletError && <p className="form-error" role="alert">{walletError}</p>}</div>
+              <div className="private-form"><label><span>WALLET ADDRESS (OPTIONAL VERIFICATION)</span><input value={walletSession.manualAddress} onChange={(event) => patchWalletSession(selectedVault, { manualAddress: event.target.value })} placeholder="zig1…" autoComplete="off" spellCheck={false} /></label><label><span>PRIVATE KEY / MNEMONIC</span><input ref={secretInputRef} type="password" placeholder="32-byte hex key or 12/24-word mnemonic" autoComplete="new-password" spellCheck={false} /></label><div className="warning-note"><b>!</b><p><strong>Browser-session automation only.</strong> The signer stays in memory and all loops stop when you disconnect, refresh, close, or suspend this tab.</p></div><button className="unlock-button" type="button" onClick={() => void unlockManualSession(selectedVault)} disabled={walletSession.unlocking}>{walletSession.unlocking ? 'UNLOCKING…' : 'UNLOCK SESSION'}</button>{walletSession.error && <p className="form-error" role="alert">{walletSession.error}</p>}</div>
             )}
           </article>
 
@@ -633,7 +633,7 @@ export default function Home() {
             <p className="vault-summary">{vault.summary}</p>
             <div className="market-snapshot"><div><span>TVL</span><strong>{vault.tvl}</strong></div><div><span>Vault APY</span><strong>{vault.apy}</strong></div><div><span>Type</span><strong>{vault.type}</strong></div><div><span>Risk</span><strong>{vault.risk}</strong></div></div>
             <p className="snapshot-note">Reference snapshot supplied by the team · values are not live</p>
-            <div className="detail-list"><div><span>Vault address</span><code>{vault.address}</code></div><div><span>Transfer token</span><strong>ZIG</strong></div><div><span>Source balance</span><strong>{walletAddress ? `${formatBaseUnits(balanceBaseUnits)} ZIG` : '—'}</strong></div><div><span>Native gas balance</span><strong>{walletAddress ? `${formatBaseUnits(balanceBaseUnits)} ZIG` : '—'}</strong></div><div><span>Total transferred</span><strong>{formatBaseUnits(totalTransferred)} ZIG</strong></div><div><span>Successful executions</span><strong>{successfulHistory.length}</strong></div></div>
+            <div className="detail-list"><div><span>Vault address</span><code>{vault.address}</code></div><div><span>Transfer token</span><strong>ZIG</strong></div><div><span>Source balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.balanceBaseUnits)} ZIG` : '—'}</strong></div><div><span>Native gas balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.balanceBaseUnits)} ZIG` : '—'}</strong></div><div><span>Total transferred</span><strong>{formatBaseUnits(totalTransferred)} ZIG</strong></div><div><span>Successful executions</span><strong>{successfulHistory.length}</strong></div></div>
             <div className="interface-banner"><span>⌁</span><div><strong>{vault.address && vault.address !== 'Not configured' ? 'DIRECT ZIG TRANSFER READY' : 'RECIPIENT_ADDRESS_NOT_CONFIGURED'}</strong><small>{vault.address && vault.address !== 'Not configured' ? 'Native ZIG transfers use a 1.5× simulated gas allowance.' : 'Add this vault wallet address to the server environment before transfers can run.'}</small></div></div>
           </article>
         </section>
