@@ -1,7 +1,7 @@
 'use client';
 
-import { DirectSecp256k1HdWallet, DirectSecp256k1Wallet, type OfflineSigner } from '@cosmjs/proto-signing';
-import { GasPrice, SigningStargateClient, coin } from '@cosmjs/stargate';
+import { DirectSecp256k1HdWallet, DirectSecp256k1Wallet, type EncodeObject, type OfflineSigner } from '@cosmjs/proto-signing';
+import { GasPrice, SigningStargateClient } from '@cosmjs/stargate';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 type KeplrProvider = {
@@ -13,6 +13,22 @@ type KeplrProvider = {
 };
 type BrowserWalletWindow = typeof window & { keplr?: KeplrProvider; getOfflineSignerAuto?(chainId: string): Promise<OfflineSigner>; getOfflineSigner?(chainId: string): OfflineSigner };
 type Vault = { pair: string; name: string; address: string | null; accent: 'blue' | 'purple' | 'orange'; tvl: string; apy: string; type: string; risk: string; summary: string };
+type ChainConfig = { name: string; id: string; rpcUrl: string; apiUrl: string; explorerUrl: string };
+type TokenConfig = { symbol: string; denom: string; decimals: number };
+type IbcTransferConfig = {
+  sourcePort: string;
+  sourceChannel: string;
+  timeoutSeconds: number;
+  orbiter: {
+    enabled: boolean;
+    feeRecipient: string;
+    feeAmount: string;
+    destinationDomain: number;
+    mintRecipient: string;
+    destinationCaller: string;
+    passthroughPayload: string;
+  };
+};
 type AutomationStatus = 'stopped' | 'running' | 'paused';
 type DeliveryMode = 'once' | 'automation';
 type SessionSource = 'browser' | 'private';
@@ -21,9 +37,16 @@ type HistoryStatus = 'Pending' | 'Success' | 'Failed';
 type HistoryEntry = { id: string; vaultIndex: number; time: number; amountBaseUnits: bigint; status: HistoryStatus; hash?: string; error?: string; source: 'Manual' | 'Automation' | 'Chain' };
 type AuthUser = { id: string; email: string; role: 'ADMIN' | 'USER'; active: boolean; createdAt: string };
 // Each vault tab owns its own signer, address, and balance — vaults are never forced to share one wallet.
-type WalletSession = { mode: 'wallet' | 'private'; source: SessionSource | null; address: string; manualAddress: string; balanceBaseUnits: string; error: string; connecting: boolean; unlocking: boolean; hasSigner: boolean };
+type WalletSession = { mode: 'wallet' | 'private'; source: SessionSource | null; address: string; manualAddress: string; balanceBaseUnits: string; nativeGasBaseUnits: string; error: string; connecting: boolean; unlocking: boolean; hasSigner: boolean };
 
-const chain = { chainId: 'zig-test-2', chainName: 'ZIGChain Testnet', rpc: 'https://testnet-rpc.zigchain.com', rest: 'https://testnet-api.zigchain.com' };
+const defaultChainConfig: ChainConfig = { name: 'ZIGChain Testnet', id: 'zig-test-2', rpcUrl: 'https://testnet-rpc.zigchain.com', apiUrl: 'https://testnet-api.zigchain.com', explorerUrl: 'https://testnet.zigscan.org' };
+const defaultTokenConfig: TokenConfig = { symbol: 'ZIG', denom: 'uzig', decimals: 6 };
+const defaultIbcTransferConfig: IbcTransferConfig = {
+  sourcePort: 'transfer',
+  sourceChannel: 'channel-3',
+  timeoutSeconds: 600,
+  orbiter: { enabled: false, feeRecipient: '', feeAmount: '', destinationDomain: 0, mintRecipient: '', destinationCaller: '', passthroughPayload: '' },
+};
 const defaultVaults: Vault[] = [
   { pair: 'PAIR 1', name: 'Stablecoin Yield', address: 'Not configured', accent: 'blue', tvl: '$39,717,012', apy: '9.95%', type: 'Stablecoin Yield', risk: 'Low', summary: 'Low-risk stablecoin strategy' },
   { pair: 'PAIR 2', name: 'Opportunistic Credit', address: 'Not configured', accent: 'purple', tvl: '$16,679,657', apy: '10.32%', type: 'Opportunistic', risk: 'Low', summary: 'Diversified private credit strategy' },
@@ -35,6 +58,11 @@ const intervals = [
 ];
 const API_URL = 'http://localhost:4000';
 const GAS_MULTIPLIER = 1.5;
+const BIGINT_ZERO = BigInt(0);
+const BIGINT_ONE = BigInt(1);
+const BIGINT_TEN = BigInt(10);
+const RANDOM_WORD_BITS = BigInt(32);
+const MILLISECONDS_TO_NANOSECONDS = BigInt(1000000);
 
 function apiRequest(path: string, init: RequestInit = {}) {
   return fetch(`${API_URL}${path}`, { ...init, credentials: 'include' });
@@ -47,12 +75,17 @@ function formatBaseUnits(value: string | bigint, decimals = 6) {
   return `${BigInt(whole).toLocaleString()}${fraction ? `.${fraction}` : ''}`;
 }
 
-function parseZigAmount(value: string): bigint {
+function baseUnitMultiplier(decimals: number) {
+  return BIGINT_TEN ** BigInt(decimals);
+}
+
+function parseTokenAmount(value: string, decimals: number): bigint {
   const normalized = value.replaceAll(',', '').trim();
-  if (!/^\d+(\.\d{1,6})?$/.test(normalized)) throw new Error('Enter a valid ZIG amount with no more than 6 decimals.');
+  const amountPattern = decimals === 0 ? /^\d+$/ : new RegExp(`^\\d+(\\.\\d{1,${decimals}})?$`);
+  if (!amountPattern.test(normalized)) throw new Error(`Enter a valid amount with no more than ${decimals} decimals.`);
   const [whole, fraction = ''] = normalized.split('.');
-  const amount = BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, '0'));
-  if (amount <= 0n) throw new Error('Transfer amount must be greater than zero.');
+  const amount = BigInt(whole) * baseUnitMultiplier(decimals) + BigInt(fraction.padEnd(decimals, '0') || '0');
+  if (amount <= BIGINT_ZERO) throw new Error('Transfer amount must be greater than zero.');
   return amount;
 }
 
@@ -66,8 +99,8 @@ function randomAmount(minimum: bigint, maximum: bigint) {
   if (minimum === maximum) return minimum;
   const random = new Uint32Array(2);
   crypto.getRandomValues(random);
-  const value = (BigInt(random[0]) << 32n) | BigInt(random[1]);
-  return minimum + (value % (maximum - minimum + 1n));
+  const value = (BigInt(random[0]) << RANDOM_WORD_BITS) | BigInt(random[1]);
+  return minimum + (value % (maximum - minimum + BIGINT_ONE));
 }
 
 function formatCountdown(nextAt: number | null, now: number) {
@@ -81,16 +114,16 @@ function initialAutomations(): Automation[] {
 }
 
 function initialWalletSessions(): WalletSession[] {
-  return defaultVaults.map(() => ({ mode: 'wallet', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false }));
+  return defaultVaults.map(() => ({ mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false }));
 }
 
 function unixNow() { return Date.now(); }
 
-function hasValidRange(settings: Automation) {
+function hasValidRange(settings: Automation, decimals = defaultTokenConfig.decimals) {
   try {
-    const minimum = parseZigAmount(settings.minimum);
-    if (settings.mode === 'once') return minimum > 0n;
-    const maximum = settings.maximum.trim() ? parseZigAmount(settings.maximum) : minimum;
+    const minimum = parseTokenAmount(settings.minimum, decimals);
+    if (settings.mode === 'once') return minimum > BIGINT_ZERO;
+    const maximum = settings.maximum.trim() ? parseTokenAmount(settings.maximum, decimals) : minimum;
     return maximum >= minimum && Number.isInteger(settings.interval) && settings.interval >= 5;
   } catch {
     return false;
@@ -99,6 +132,10 @@ function hasValidRange(settings: Automation) {
 
 export default function Home() {
   const [vaults, setVaults] = useState<Vault[]>(defaultVaults);
+  const [chainConfig, setChainConfig] = useState<ChainConfig>(defaultChainConfig);
+  const [transferToken, setTransferToken] = useState<TokenConfig>(defaultTokenConfig);
+  const [nativeToken, setNativeToken] = useState<TokenConfig>(defaultTokenConfig);
+  const [ibcTransfer, setIbcTransfer] = useState<IbcTransferConfig>(defaultIbcTransferConfig);
   const [automations, setAutomations] = useState<Automation[]>(initialAutomations);
   const [selectedVault, setSelectedVault] = useState(0);
   const [walletSessions, setWalletSessions] = useState<WalletSession[]>(initialWalletSessions);
@@ -125,6 +162,10 @@ export default function Home() {
   const signersRef = useRef<Array<OfflineSigner | null>>([null, null, null]);
   const walletSessionsRef = useRef<WalletSession[]>(walletSessions);
   const vaultsRef = useRef<Vault[]>(defaultVaults);
+  const chainConfigRef = useRef<ChainConfig>(defaultChainConfig);
+  const transferTokenRef = useRef<TokenConfig>(defaultTokenConfig);
+  const nativeTokenRef = useRef<TokenConfig>(defaultTokenConfig);
+  const ibcTransferRef = useRef<IbcTransferConfig>(defaultIbcTransferConfig);
   const automationsRef = useRef<Automation[]>(automations);
   const timersRef = useRef<Array<ReturnType<typeof setTimeout> | null>>([null, null, null]);
   const transferQueueRef = useRef<Array<Promise<boolean>>>([Promise.resolve(true), Promise.resolve(true), Promise.resolve(true)]);
@@ -135,7 +176,7 @@ export default function Home() {
   const walletSession = walletSessions[selectedVault];
   const selectedHistory = useMemo(() => history.filter((entry) => entry.vaultIndex === selectedVault && (historyFilter === 'All' || entry.status === historyFilter)), [history, historyFilter, selectedVault]);
   const successfulHistory = history.filter((entry) => entry.vaultIndex === selectedVault && entry.status === 'Success');
-  const totalTransferred = successfulHistory.reduce((sum, entry) => sum + entry.amountBaseUnits, 0n);
+  const totalTransferred = successfulHistory.reduce((sum, entry) => sum + entry.amountBaseUnits, BIGINT_ZERO);
   const anyRunning = automations.some((item) => item.status === 'running');
   const anyActive = automations.some((item) => item.status !== 'stopped');
 
@@ -185,17 +226,43 @@ export default function Home() {
   async function loadPublicConfig() {
     const response = await apiRequest('/api/config/public');
     if (!response.ok) throw new Error('Configuration service unavailable.');
-    const data = await response.json() as { vaults: Array<{ name: string; address: string | null }> };
+    const data = await response.json() as {
+      chain?: ChainConfig;
+      nativeToken?: TokenConfig;
+      token?: TokenConfig;
+      ibcTransfer?: IbcTransferConfig;
+      vaults: Array<{ name: string; address: string | null }>;
+    };
+    const nextChainConfig = data.chain ?? defaultChainConfig;
+    const nextTransferToken = data.token ?? defaultTokenConfig;
+    const nextNativeToken = data.nativeToken ?? defaultTokenConfig;
+    const nextIbcTransfer = data.ibcTransfer ?? defaultIbcTransferConfig;
     const configured = defaultVaults.map((item, index) => ({ ...item, name: data.vaults[index]?.name ?? item.name, address: data.vaults[index]?.address ?? null }));
+    chainConfigRef.current = nextChainConfig;
+    transferTokenRef.current = nextTransferToken;
+    nativeTokenRef.current = nextNativeToken;
+    ibcTransferRef.current = nextIbcTransfer;
     vaultsRef.current = configured;
+    setChainConfig(nextChainConfig);
+    setTransferToken(nextTransferToken);
+    setNativeToken(nextNativeToken);
+    setIbcTransfer(nextIbcTransfer);
     setVaults(configured);
   }
 
   async function loadBalance(index: number, address: string, generation = sessionGenerationRef.current[index]) {
-    const response = await apiRequest(`/api/wallet/${encodeURIComponent(address)}/balance`);
-    if (!response.ok) throw new Error('Wallet opened, but the ZIG balance could not be loaded.');
-    const balance = await response.json() as { amountBaseUnits: string };
-    if (generation === sessionGenerationRef.current[index]) patchWalletSession(index, { balanceBaseUnits: balance.amountBaseUnits });
+    const transferDenom = transferTokenRef.current.denom;
+    const gasDenom = nativeTokenRef.current.denom;
+    const [transferResponse, gasResponse] = await Promise.all([
+      apiRequest(`/api/wallet/${encodeURIComponent(address)}/balance?denom=${encodeURIComponent(transferDenom)}`),
+      transferDenom === gasDenom
+        ? Promise.resolve(null)
+        : apiRequest(`/api/wallet/${encodeURIComponent(address)}/balance?denom=${encodeURIComponent(gasDenom)}`),
+    ]);
+    if (!transferResponse.ok || (gasResponse && !gasResponse.ok)) throw new Error('Wallet opened, but balances could not be loaded.');
+    const transferBalance = await transferResponse.json() as { amountBaseUnits: string };
+    const gasBalance = gasResponse ? await gasResponse.json() as { amountBaseUnits: string } : transferBalance;
+    if (generation === sessionGenerationRef.current[index]) patchWalletSession(index, { balanceBaseUnits: transferBalance.amountBaseUnits, nativeGasBaseUnits: gasBalance.amountBaseUnits });
   }
 
   async function loadHistory(index: number, address: string, generation = sessionGenerationRef.current[index]) {
@@ -232,19 +299,28 @@ export default function Home() {
       const browserWallet = window as BrowserWalletWindow;
       const keplr = browserWallet.keplr;
       if (!keplr) throw new Error('Install the Keplr browser extension to connect.');
+      const activeChain = chainConfigRef.current;
+      const activeNativeToken = nativeTokenRef.current;
+      const activeTransferToken = transferTokenRef.current;
       await keplr.experimentalSuggestChain({
-        ...chain,
+        chainId: activeChain.id,
+        chainName: activeChain.name,
+        rpc: activeChain.rpcUrl,
+        rest: activeChain.apiUrl,
         bip44: { coinType: 118 },
         bech32Config: { bech32PrefixAccAddr: 'zig', bech32PrefixAccPub: 'zigpub', bech32PrefixValAddr: 'zigvaloper', bech32PrefixValPub: 'zigvaloperpub', bech32PrefixConsAddr: 'zigvalcons', bech32PrefixConsPub: 'zigvalconspub' },
-        currencies: [{ coinDenom: 'ZIG', coinMinimalDenom: 'uzig', coinDecimals: 6 }],
-        feeCurrencies: [{ coinDenom: 'ZIG', coinMinimalDenom: 'uzig', coinDecimals: 6, gasPriceStep: { low: 0.0025, average: 0.025, high: 0.05 } }],
-        stakeCurrency: { coinDenom: 'ZIG', coinMinimalDenom: 'uzig', coinDecimals: 6 },
+        currencies: [
+          { coinDenom: activeNativeToken.symbol, coinMinimalDenom: activeNativeToken.denom, coinDecimals: activeNativeToken.decimals },
+          ...(activeTransferToken.denom === activeNativeToken.denom ? [] : [{ coinDenom: activeTransferToken.symbol, coinMinimalDenom: activeTransferToken.denom, coinDecimals: activeTransferToken.decimals }]),
+        ],
+        feeCurrencies: [{ coinDenom: activeNativeToken.symbol, coinMinimalDenom: activeNativeToken.denom, coinDecimals: activeNativeToken.decimals, gasPriceStep: { low: 0.0025, average: 0.025, high: 0.05 } }],
+        stakeCurrency: { coinDenom: activeNativeToken.symbol, coinMinimalDenom: activeNativeToken.denom, coinDecimals: activeNativeToken.decimals },
       });
-      await keplr.enable(chain.chainId);
-      const key = await keplr.getKey(chain.chainId);
+      await keplr.enable(activeChain.id);
+      const key = await keplr.getKey(activeChain.id);
       const signer = browserWallet.getOfflineSignerAuto
-        ? await browserWallet.getOfflineSignerAuto(chain.chainId)
-        : browserWallet.getOfflineSigner?.(chain.chainId) ?? keplr.getOfflineSigner?.(chain.chainId);
+        ? await browserWallet.getOfflineSignerAuto(activeChain.id)
+        : browserWallet.getOfflineSigner?.(activeChain.id) ?? keplr.getOfflineSigner?.(activeChain.id);
       if (!signer) throw new Error('Keplr connected, but its transaction signer is unavailable. Refresh the extension and try again.');
       const [signerAccount] = await signer.getAccounts();
       if (!signerAccount || signerAccount.address !== key.bech32Address) throw new Error('Keplr returned a signer for a different account.');
@@ -316,7 +392,7 @@ export default function Home() {
     stopAutomation(index);
     sessionGenerationRef.current[index] += 1;
     signersRef.current[index] = null;
-    patchWalletSession(index, { source: null, address: '', manualAddress: '', balanceBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false });
+    patchWalletSession(index, { source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false });
     setHistory((current) => current.filter((entry) => entry.vaultIndex !== index));
     setSendingVaults((current) => current.filter((item) => item !== index));
     if (selectedVault === index) setTransferStatus(null);
@@ -333,7 +409,7 @@ export default function Home() {
       if (!stillUsingBrowser) {
         try {
           const keplr = (window as typeof window & { keplr?: KeplrProvider }).keplr;
-          await keplr?.disable?.(chain.chainId);
+          await keplr?.disable?.(chainConfigRef.current.id);
         } catch {
           // The local app session is cleared even when the extension does not expose permission revocation.
         }
@@ -372,6 +448,14 @@ export default function Home() {
     setAuthUser(null);
     setVaults(defaultVaults);
     vaultsRef.current = defaultVaults;
+    chainConfigRef.current = defaultChainConfig;
+    transferTokenRef.current = defaultTokenConfig;
+    nativeTokenRef.current = defaultTokenConfig;
+    ibcTransferRef.current = defaultIbcTransferConfig;
+    setChainConfig(defaultChainConfig);
+    setTransferToken(defaultTokenConfig);
+    setNativeToken(defaultTokenConfig);
+    setIbcTransfer(defaultIbcTransferConfig);
     setAdminOpen(false);
     setCompanyUsers([]);
     setLoginEmail('');
@@ -422,8 +506,9 @@ export default function Home() {
 
   function getAmountRange(index: number) {
     const settings = automationsRef.current[index];
-    const minimum = parseZigAmount(settings.minimum);
-    const maximum = settings.mode === 'once' ? minimum : settings.maximum.trim() ? parseZigAmount(settings.maximum) : minimum;
+    const decimals = transferTokenRef.current.decimals;
+    const minimum = parseTokenAmount(settings.minimum, decimals);
+    const maximum = settings.mode === 'once' ? minimum : settings.maximum.trim() ? parseTokenAmount(settings.maximum, decimals) : minimum;
     if (maximum < minimum) throw new Error('Maximum amount must be greater than or equal to the minimum.');
     if (settings.mode === 'automation' && (!Number.isInteger(settings.interval) || settings.interval < 5)) throw new Error('Frequency must be at least 5 seconds.');
     return { minimum, maximum };
@@ -432,11 +517,56 @@ export default function Home() {
   function canSend(index: number) {
     const target = vaults[index];
     const session = walletSessions[index];
-    return Boolean(session?.hasSigner && target?.address && target.address !== 'Not configured' && hasValidRange(automations[index]));
+    return Boolean(session?.hasSigner && target?.address && target.address !== 'Not configured' && hasValidRange(automations[index], transferToken.decimals));
   }
 
   function canAutomate(index: number) {
     return walletSessions[index]?.source === 'private' && canSend(index);
+  }
+
+  function buildOrbiterMemo(settings: IbcTransferConfig['orbiter']) {
+    if (!settings.enabled) return '';
+    if (!settings.mintRecipient || !settings.destinationCaller) throw new Error('Orbiter CCTP memo is missing mint recipient or destination caller.');
+    const preActions = settings.feeRecipient && settings.feeAmount ? [{
+      id: 'ACTION_FEE',
+      attributes: {
+        '@type': '/noble.orbiter.controller.action.v2.FeeAttributes',
+        fees_info: [{ recipient: settings.feeRecipient, amount: { value: settings.feeAmount } }],
+      },
+    }] : [];
+    return JSON.stringify({
+      orbiter: {
+        pre_actions: preActions,
+        forwarding: {
+          protocol_id: 'PROTOCOL_CCTP',
+          attributes: {
+            '@type': '/noble.orbiter.controller.forwarding.v1.CCTPAttributes',
+            destination_domain: settings.destinationDomain,
+            mint_recipient: settings.mintRecipient,
+            destination_caller: settings.destinationCaller,
+          },
+          passthrough_payload: settings.passthroughPayload,
+        },
+      },
+    });
+  }
+
+  function buildIbcTransferMessage(sender: string, receiver: string, amount: bigint): EncodeObject {
+    const settings = ibcTransferRef.current;
+    if (!settings.sourcePort || !settings.sourceChannel) throw new Error('IBC source port and channel must be configured.');
+    return {
+      typeUrl: '/ibc.applications.transfer.v1.MsgTransfer',
+      value: {
+        sourcePort: settings.sourcePort,
+        sourceChannel: settings.sourceChannel,
+        token: { denom: transferTokenRef.current.denom, amount: amount.toString() },
+        sender,
+        receiver,
+        timeoutHeight: { revisionNumber: BIGINT_ZERO, revisionHeight: BIGINT_ZERO },
+        timeoutTimestamp: BigInt(unixNow() + (settings.timeoutSeconds * 1000)) * MILLISECONDS_TO_NANOSECONDS,
+        memo: buildOrbiterMemo(settings.orbiter),
+      },
+    };
   }
 
   async function executeTransfer(index: number, amount: bigint, source: 'Manual' | 'Automation'): Promise<boolean> {
@@ -457,13 +587,13 @@ export default function Home() {
       const [account] = await signer.getAccounts();
       if (!account) throw new Error('Signer account is unavailable.');
       if (generation !== sessionGenerationRef.current[index]) return false;
-      client = await SigningStargateClient.connectWithSigner(chain.rpc, signer, { gasPrice: GasPrice.fromString('0.025uzig') });
+      client = await SigningStargateClient.connectWithSigner(chainConfigRef.current.rpcUrl, signer, { gasPrice: GasPrice.fromString(`0.025${nativeTokenRef.current.denom}`) });
       if (generation !== sessionGenerationRef.current[index]) return false;
-      const result = await client.sendTokens(account.address, target.address, [coin(amount.toString(), 'uzig')], GAS_MULTIPLIER, `Vaultflow ${source.toLowerCase()} · ${target.pair}`);
+      const result = await client.signAndBroadcast(account.address, [buildIbcTransferMessage(account.address, target.address, amount)], GAS_MULTIPLIER);
       if (result.code !== 0) throw new Error(result.rawLog || `Transaction failed with code ${result.code}.`);
       if (generation !== sessionGenerationRef.current[index]) return true;
       setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Success', hash: result.transactionHash } : item));
-      setTransferStatus({ kind: 'success', message: `${formatBaseUnits(amount)} ZIG sent to ${target.name}.`, hash: result.transactionHash });
+      setTransferStatus({ kind: 'success', message: `${formatBaseUnits(amount, transferTokenRef.current.decimals)} ${transferTokenRef.current.symbol} transferred to ${target.name}.`, hash: result.transactionHash });
       try { await loadBalance(index, account.address, generation); } catch { /* The confirmed transfer remains successful if balance refresh is temporarily unavailable. */ }
       return true;
     } catch (error) {
@@ -567,7 +697,7 @@ export default function Home() {
     : automation.mode === 'automation' && walletSession.source === 'browser' ? 'Keplr asks for approval on every transaction. Use the Private Key tab once to unlock automatic signing for this browser session.'
     : !vault.address || vault.address === 'Not configured' ? 'Configure this vault address first.'
     : !automation.minimum.trim() ? 'Enter an amount to enable the transfer button.'
-    : !hasValidRange(automation) ? automation.mode === 'automation' ? 'Check the amount range and use a frequency of at least 5 seconds.' : 'Enter a valid ZIG amount.'
+    : !hasValidRange(automation, transferToken.decimals) ? automation.mode === 'automation' ? 'Check the amount range and use a frequency of at least 5 seconds.' : `Enter a valid ${transferToken.symbol} amount.`
     : '';
 
   if (authLoading) return <main className="auth-shell"><div className="auth-loading"><span className="brand-glyph">V</span><p>Loading Vaultflow…</p></div></main>;
@@ -600,7 +730,7 @@ export default function Home() {
 
       <div className="console-content">
         <header className="vault-hero">
-          <div className="hero-title"><p><span className={`pulse ${vault.accent}`} /> {vault.pair} — VAULT AUTOMATION CONSOLE</p><h1><span>ZIG</span><b>→</b>{vault.name}</h1></div>
+          <div className="hero-title"><p><span className={`pulse ${vault.accent}`} /> {vault.pair} — VAULT AUTOMATION CONSOLE</p><h1><span>{transferToken.symbol}</span><b>→</b>{vault.name}</h1></div>
           <div className="hero-status"><span className="state-pill"><i /> TIMER READY</span><span className={`state-pill ${automation.status}`}>{statusLabel}</span><button type="button" onClick={() => void disconnectWallet(selectedVault)} disabled={!walletSession.source}>DISCONNECT</button></div>
         </header>
 
@@ -612,16 +742,16 @@ export default function Home() {
         <section className="two-column">
           <article className="console-card wallet-card">
             <div className="card-title"><span className="title-icon blue">▣</span><div><h2>Wallet Access</h2><p>Each vault tab keeps its own wallet connection.</p></div></div>
-            <div className="mode-switch" role="tablist" aria-label="Wallet mode"><button className={walletSession.mode === 'wallet' ? 'active' : ''} type="button" onClick={() => patchWalletSession(selectedVault, { mode: 'wallet' })}>BROWSER WALLET {walletSession.source === 'browser' && <span className="connected-mini">CONNECTED</span>}</button><button className={walletSession.mode === 'private' ? 'active' : ''} type="button" onClick={() => patchWalletSession(selectedVault, { mode: 'private' })}>PRIVATE KEY {walletSession.source === 'private' && <span className="connected-mini">CONNECTED</span>}</button></div>
+            <div className="mode-switch" role="tablist" aria-label="Wallet mode"><button className={walletSession.mode === 'private' ? 'active' : ''} type="button" onClick={() => patchWalletSession(selectedVault, { mode: 'private' })}>PRIVATE KEY {walletSession.source === 'private' && <span className="connected-mini">CONNECTED</span>}</button><button className={walletSession.mode === 'wallet' ? 'active' : ''} type="button" onClick={() => patchWalletSession(selectedVault, { mode: 'wallet' })}>BROWSER WALLET {walletSession.source === 'browser' && <span className="connected-mini">CONNECTED</span>}</button></div>
             {walletSession.source ? (
               <div className="connection-panel">
                 <div className="connection-heading"><span className="connection-mark">✓</span><div><small>ACTIVE CONNECTION · {vault.pair}</small><h3>{walletSession.source === 'browser' ? 'Browser wallet connected' : 'Private-key session connected'}</h3></div><span className="connection-method">{walletSession.source === 'browser' ? 'KEPLR' : 'PRIVATE KEY'}</span></div>
-                <div className="connected-account"><span>WALLET ADDRESS</span><code>{walletSession.address}</code><span>BALANCE</span><strong>{formatBaseUnits(walletSession.balanceBaseUnits)} ZIG</strong></div>
+                <div className="connected-account"><span>WALLET ADDRESS</span><code>{walletSession.address}</code><span>BALANCE</span><strong>{formatBaseUnits(walletSession.balanceBaseUnits, transferToken.decimals)} {transferToken.symbol}</strong></div>
                 <p>This connection only applies to {vault.name}. Select another vault tab to connect a different wallet.</p>
                 <button className="disconnect-button" type="button" onClick={() => void disconnectWallet(selectedVault)}>DISCONNECT & CLEAR WALLET DATA</button>
               </div>
             ) : walletSession.mode === 'wallet' ? (
-              <div className="wallet-connect"><span className="wallet-orbit"><i /><b>◈</b></span><h3>Connect a browser wallet</h3><p>Connect Keplr to load the wallet address, balance, and confirmed vault transactions for {vault.name}.</p><button type="button" onClick={() => void connectKeplr(selectedVault)} disabled={walletSession.connecting}>{walletSession.connecting ? 'CONNECTING…' : 'CONNECT KEPLR'} <span>→</span></button><small>{walletSession.error || 'ZIGChain Testnet · chain ID zig-test-2'}</small></div>
+              <div className="wallet-connect"><span className="wallet-orbit"><i /><b>◈</b></span><h3>Connect a browser wallet</h3><p>Connect Keplr to load the wallet address, balance, and confirmed vault transactions for {vault.name}.</p><button type="button" onClick={() => void connectKeplr(selectedVault)} disabled={walletSession.connecting}>{walletSession.connecting ? 'CONNECTING…' : 'CONNECT KEPLR'} <span>→</span></button><small>{walletSession.error || `${chainConfig.name} · chain ID ${chainConfig.id}`}</small></div>
             ) : (
               <div className="private-form"><label><span>WALLET ADDRESS (OPTIONAL VERIFICATION)</span><input value={walletSession.manualAddress} onChange={(event) => patchWalletSession(selectedVault, { manualAddress: event.target.value })} placeholder="zig1…" autoComplete="off" spellCheck={false} /></label><label><span>PRIVATE KEY / MNEMONIC</span><input ref={secretInputRef} type="password" placeholder="32-byte hex key or 12/24-word mnemonic" autoComplete="new-password" spellCheck={false} /></label><div className="warning-note"><b>!</b><p><strong>Browser-session automation only.</strong> The signer stays in memory and all loops stop when you disconnect, refresh, close, or suspend this tab.</p></div><button className="unlock-button" type="button" onClick={() => void unlockManualSession(selectedVault)} disabled={walletSession.unlocking}>{walletSession.unlocking ? 'UNLOCKING…' : 'UNLOCK SESSION'}</button>{walletSession.error && <p className="form-error" role="alert">{walletSession.error}</p>}</div>
             )}
@@ -633,8 +763,8 @@ export default function Home() {
             <p className="vault-summary">{vault.summary}</p>
             <div className="market-snapshot"><div><span>TVL</span><strong>{vault.tvl}</strong></div><div><span>Vault APY</span><strong>{vault.apy}</strong></div><div><span>Type</span><strong>{vault.type}</strong></div><div><span>Risk</span><strong>{vault.risk}</strong></div></div>
             <p className="snapshot-note">Reference snapshot supplied by the team · values are not live</p>
-            <div className="detail-list"><div><span>Vault address</span><code>{vault.address}</code></div><div><span>Transfer token</span><strong>ZIG</strong></div><div><span>Source balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.balanceBaseUnits)} ZIG` : '—'}</strong></div><div><span>Native gas balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.balanceBaseUnits)} ZIG` : '—'}</strong></div><div><span>Total transferred</span><strong>{formatBaseUnits(totalTransferred)} ZIG</strong></div><div><span>Successful executions</span><strong>{successfulHistory.length}</strong></div></div>
-            <div className="interface-banner"><span>⌁</span><div><strong>{vault.address && vault.address !== 'Not configured' ? 'DIRECT ZIG TRANSFER READY' : 'RECIPIENT_ADDRESS_NOT_CONFIGURED'}</strong><small>{vault.address && vault.address !== 'Not configured' ? 'Native ZIG transfers use a 1.5× simulated gas allowance.' : 'Add this vault wallet address to the server environment before transfers can run.'}</small></div></div>
+            <div className="detail-list"><div><span>IBC receiver</span><code>{vault.address}</code></div><div><span>Transfer token</span><strong>{transferToken.symbol}</strong></div><div><span>Source balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.balanceBaseUnits, transferToken.decimals)} ${transferToken.symbol}` : '—'}</strong></div><div><span>Native gas balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.nativeGasBaseUnits, nativeToken.decimals)} ${nativeToken.symbol}` : '—'}</strong></div><div><span>Total transferred</span><strong>{formatBaseUnits(totalTransferred, transferToken.decimals)} {transferToken.symbol}</strong></div><div><span>Successful executions</span><strong>{successfulHistory.length}</strong></div></div>
+            <div className="interface-banner"><span>⌁</span><div><strong>{vault.address && vault.address !== 'Not configured' ? 'IBC MSGTRANSFER READY' : 'IBC_RECEIVER_NOT_CONFIGURED'}</strong><small>{vault.address && vault.address !== 'Not configured' ? `Transfers use ${ibcTransfer.sourcePort}/${ibcTransfer.sourceChannel} with a ${ibcTransfer.timeoutSeconds}s timeout.` : 'Add this vault IBC receiver address to the server environment before transfers can run.'}</small></div></div>
           </article>
         </section>
 
@@ -644,9 +774,9 @@ export default function Home() {
             <button className={automation.mode === 'once' ? 'active' : ''} type="button" disabled={automation.status === 'running'} onClick={() => selectDeliveryMode('once')}><strong>Send once</strong><small>One transfer using an exact amount</small></button>
             <button className={automation.mode === 'automation' ? 'active' : ''} type="button" disabled={automation.status === 'running'} onClick={() => selectDeliveryMode('automation')}><strong>Automation</strong><small>Repeat within an amount range</small></button>
           </div>
-          <div className="direction-bar"><span className="active">SOURCE WALLET <b>→</b> {vault.name.toUpperCase()}</span><span>ZIG TRANSFER</span></div>
-          <div className={`amount-grid ${automation.mode === 'once' ? 'single' : ''}`}><label><span>{automation.mode === 'once' ? 'AMOUNT TO SEND' : 'MINIMUM AMOUNT'}</span><div><input value={automation.minimum} onChange={(event) => updateSelectedAutomation({ minimum: event.target.value })} disabled={automation.status === 'running'} inputMode="decimal" placeholder="e.g. 0.1" /><b>ZIG</b></div></label><label className="max-field" aria-hidden={automation.mode === 'once'}><span>MAXIMUM AMOUNT</span><div><input value={automation.maximum} onChange={(event) => updateSelectedAutomation({ maximum: event.target.value })} disabled={automation.status === 'running' || automation.mode === 'once'} inputMode="decimal" placeholder="Blank uses minimum" tabIndex={automation.mode === 'once' ? -1 : 0} /><b>ZIG</b></div></label></div>
-          <div className="amount-note"><b>Note:</b> {automation.mode === 'once' ? 'Send once transfers exactly the amount entered above.' : 'Each run chooses an amount between minimum and maximum. Failed transactions automatically pause this vault.'} ZIG uses 6 decimals.</div>
+          <div className="direction-bar"><span className="active">SOURCE WALLET <b>→</b> {vault.name.toUpperCase()}</span><span>IBC MSGTRANSFER</span></div>
+          <div className={`amount-grid ${automation.mode === 'once' ? 'single' : ''}`}><label><span>{automation.mode === 'once' ? 'AMOUNT TO SEND' : 'MINIMUM AMOUNT'}</span><div><input value={automation.minimum} onChange={(event) => updateSelectedAutomation({ minimum: event.target.value })} disabled={automation.status === 'running'} inputMode="decimal" placeholder="e.g. 0.1" /><b>{transferToken.symbol}</b></div></label><label className="max-field" aria-hidden={automation.mode === 'once'}><span>MAXIMUM AMOUNT</span><div><input value={automation.maximum} onChange={(event) => updateSelectedAutomation({ maximum: event.target.value })} disabled={automation.status === 'running' || automation.mode === 'once'} inputMode="decimal" placeholder="Blank uses minimum" tabIndex={automation.mode === 'once' ? -1 : 0} /><b>{transferToken.symbol}</b></div></label></div>
+          <div className="amount-note"><b>Note:</b> {automation.mode === 'once' ? 'Send once transfers exactly the amount entered above.' : 'Each run chooses an amount between minimum and maximum. Failed transactions automatically pause this vault.'} {transferToken.symbol} uses {transferToken.decimals} decimals.</div>
           {actionHint && <p className="action-hint">{actionHint}</p>}
           {transferStatus && <div className={`transfer-status ${transferStatus.kind}`} role="status"><strong>{transferStatus.kind === 'success' ? 'TRANSFER CONFIRMED' : 'TRANSFER NOT SENT'}</strong><span>{transferStatus.message}</span>{transferStatus.hash && <code>{transferStatus.hash}</code>}</div>}
           <div className={`automation-fields ${automation.mode === 'automation' ? 'expanded' : ''}`} aria-hidden={automation.mode !== 'automation'}><div><div className="frequency-row"><div><span>EXECUTION FREQUENCY</span><small>Choose a preset or set your own interval</small></div><div className="frequency-options">{intervals.map((item) => <button className={!automation.customInterval && automation.interval === item.value ? 'active' : ''} key={item.value} type="button" disabled={automation.status === 'running'} onClick={() => updateSelectedAutomation({ interval: item.value, customInterval: '' })}>{item.label}</button>)}<label className={automation.customInterval ? 'custom-frequency active' : 'custom-frequency'}><input type="number" min="5" step="1" value={automation.customInterval} disabled={automation.status === 'running' || automation.mode !== 'automation'} onChange={(event) => setCustomFrequency(event.target.value)} placeholder="Custom" tabIndex={automation.mode === 'automation' ? 0 : -1} /><span>sec</span></label></div></div></div></div>
@@ -656,7 +786,7 @@ export default function Home() {
         <section className="console-card history-card">
           <div className="history-header"><div className="card-title"><span className="title-icon purple">↗</span><div><h2>Transaction History</h2><p>{vault.pair} · {vault.name}</p></div></div><div className="history-filters">{['All','Success','Pending','Failed'].map((item) => <button className={historyFilter === item ? 'active' : ''} type="button" key={item} onClick={() => setHistoryFilter(item)}>{item}</button>)}</div></div>
           <div className="table-head"><span>TIME</span><span>AMOUNT</span><span>STATUS</span><span>TRANSACTION</span></div>
-          {selectedHistory.length ? selectedHistory.map((entry) => <div className="history-row" key={entry.id} title={entry.error}><span>{new Date(entry.time).toLocaleTimeString()} <small>{entry.source}</small></span><strong>{formatBaseUnits(entry.amountBaseUnits)} ZIG</strong><span className={`history-status ${entry.status.toLowerCase()}`}>{entry.status}</span><div className="tx-cell"><code>{entry.hash ? `${entry.hash.slice(0, 10)}…${entry.hash.slice(-6)}` : entry.error ? entry.error.slice(0, 34) : 'Broadcasting…'}</code>{entry.hash && <button className={copiedHash === entry.hash ? 'copied' : ''} type="button" aria-label={copiedHash === entry.hash ? 'Transaction hash copied' : 'Copy transaction hash'} title={copiedHash === entry.hash ? 'Copied' : 'Copy transaction hash'} onClick={() => void copyTransactionHash(entry.hash!)}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg></button>}</div></div>) : <div className="history-empty"><span>↗</span><strong>No {historyFilter.toLowerCase()} transactions</strong><p>Transactions for this wallet and vault will appear here.</p></div>}
+          {selectedHistory.length ? selectedHistory.map((entry) => <div className="history-row" key={entry.id} title={entry.error}><span>{new Date(entry.time).toLocaleTimeString()} <small>{entry.source}</small></span><strong>{formatBaseUnits(entry.amountBaseUnits, transferToken.decimals)} {transferToken.symbol}</strong><span className={`history-status ${entry.status.toLowerCase()}`}>{entry.status}</span><div className="tx-cell"><code>{entry.hash ? `${entry.hash.slice(0, 10)}…${entry.hash.slice(-6)}` : entry.error ? entry.error.slice(0, 34) : 'Broadcasting…'}</code>{entry.hash && <button className={copiedHash === entry.hash ? 'copied' : ''} type="button" aria-label={copiedHash === entry.hash ? 'Transaction hash copied' : 'Copy transaction hash'} title={copiedHash === entry.hash ? 'Copied' : 'Copy transaction hash'} onClick={() => void copyTransactionHash(entry.hash!)}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg></button>}</div></div>) : <div className="history-empty"><span>↗</span><strong>No {historyFilter.toLowerCase()} transactions</strong><p>Transactions for this wallet and vault will appear here.</p></div>}
         </section>
       </div>
     </main>

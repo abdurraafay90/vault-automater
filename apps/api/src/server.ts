@@ -76,11 +76,26 @@ app.post('/api/admin/users', async (request, reply) => {
 
 app.get('/api/config/public', async () => ({
   chain: { type: config.CHAIN_TYPE ?? 'cosmos-sdk', name: config.CHAIN_NAME, id: config.CHAIN_ID, rpcUrl: config.RPC_URL, apiUrl: config.API_URL, explorerUrl: config.BLOCK_EXPLORER_URL },
-  token: { symbol: config.NATIVE_TOKEN_SYMBOL, denom: config.NATIVE_TOKEN_DENOM, decimals: config.NATIVE_TOKEN_DECIMALS },
+  nativeToken: { symbol: config.NATIVE_TOKEN_SYMBOL, denom: config.NATIVE_TOKEN_DENOM, decimals: config.NATIVE_TOKEN_DECIMALS },
+  token: { symbol: config.TOKEN_SYMBOL, denom: config.TOKEN_DENOM, decimals: config.TOKEN_DECIMALS },
+  ibcTransfer: {
+    sourcePort: config.IBC_SOURCE_PORT,
+    sourceChannel: config.IBC_SOURCE_CHANNEL,
+    timeoutSeconds: config.IBC_TIMEOUT_SECONDS,
+    orbiter: {
+      enabled: config.ORBITER_CCTP_ENABLED,
+      feeRecipient: config.ORBITER_FEE_RECIPIENT,
+      feeAmount: config.ORBITER_FEE_AMOUNT,
+      destinationDomain: config.ORBITER_CCTP_DESTINATION_DOMAIN,
+      mintRecipient: config.ORBITER_CCTP_MINT_RECIPIENT,
+      destinationCaller: config.ORBITER_CCTP_DESTINATION_CALLER,
+      passthroughPayload: config.ORBITER_PASSTHROUGH_PAYLOAD,
+    },
+  },
   vaults: [
-    { id: 'vault-1', name: config.VAULT_1_NAME, address: config.VAULT_1_ADDRESS || null },
-    { id: 'vault-2', name: config.VAULT_2_NAME, address: config.VAULT_2_ADDRESS || null },
-    { id: 'vault-3', name: config.VAULT_3_NAME, address: config.VAULT_3_ADDRESS || null },
+    { id: 'vault-1', name: config.VAULT_1_NAME, address: config.VAULT_1_IBC_RECEIVER || config.VAULT_1_ADDRESS || null },
+    { id: 'vault-2', name: config.VAULT_2_NAME, address: config.VAULT_2_IBC_RECEIVER || config.VAULT_2_ADDRESS || null },
+    { id: 'vault-3', name: config.VAULT_3_NAME, address: config.VAULT_3_IBC_RECEIVER || config.VAULT_3_ADDRESS || null },
   ],
   blockchainStatus: vaultsConfigured ? 'READY' : 'VAULT_ADDRESSES_NOT_CONFIGURED',
   walletModes: ['browser-wallet', 'manual-interactive'],
@@ -89,11 +104,14 @@ app.get('/api/config/public', async () => ({
 
 app.get('/api/wallet/:address/balance', async (request, reply) => {
   const params = z.object({ address: z.string().regex(/^zig1[0-9a-z]{38,62}$/) }).safeParse(request.params);
+  const query = z.object({ denom: z.string().min(1).max(160).optional() }).safeParse(request.query);
   if (!params.success) return reply.code(400).send({ code: 'INVALID_ZIG_ADDRESS' });
-  const response = await fetch(`${config.API_URL}/cosmos/bank/v1beta1/balances/${params.data.address}/by_denom?denom=${encodeURIComponent(config.NATIVE_TOKEN_DENOM)}`);
+  if (!query.success) return reply.code(400).send({ code: 'INVALID_BALANCE_QUERY' });
+  const denom = query.data.denom ?? config.TOKEN_DENOM;
+  const response = await fetch(`${config.API_URL}/cosmos/bank/v1beta1/balances/${params.data.address}/by_denom?denom=${encodeURIComponent(denom)}`);
   if (!response.ok) return reply.code(502).send({ code: 'CHAIN_API_UNAVAILABLE' });
   const data = await response.json() as { balance?: { amount?: string; denom?: string } };
-  return { address: params.data.address, amountBaseUnits: data.balance?.amount ?? '0', denom: data.balance?.denom ?? config.NATIVE_TOKEN_DENOM, decimals: config.NATIVE_TOKEN_DECIMALS, symbol: config.NATIVE_TOKEN_SYMBOL };
+  return { address: params.data.address, amountBaseUnits: data.balance?.amount ?? '0', denom: data.balance?.denom ?? denom };
 });
 
 app.get('/api/wallet/:address/transactions', async (request, reply) => {
@@ -116,7 +134,11 @@ app.get('/api/wallet/:address/transactions', async (request, reply) => {
   type RpcEvent = { type: string; attributes: RpcAttribute[] };
   type RpcTx = { hash: string; height: string; tx_result: { code: number; gas_wanted: string; gas_used: string; events: RpcEvent[] } };
   const result = await response.json() as { result?: { txs?: RpcTx[] } };
-  const configuredVaultAddresses = [config.VAULT_1_ADDRESS, config.VAULT_2_ADDRESS, config.VAULT_3_ADDRESS];
+  const configuredVaultAddresses = [
+    config.VAULT_1_IBC_RECEIVER || config.VAULT_1_ADDRESS,
+    config.VAULT_2_IBC_RECEIVER || config.VAULT_2_ADDRESS,
+    config.VAULT_3_IBC_RECEIVER || config.VAULT_3_ADDRESS,
+  ];
   const configuredVaults = new Set(configuredVaultAddresses.filter(Boolean));
   const transactions = (result.result?.txs ?? []).flatMap((tx) => tx.tx_result.events
     .filter((event) => event.type === 'transfer')
@@ -133,7 +155,7 @@ app.get('/api/wallet/:address/transactions', async (request, reply) => {
       sender: attributes.sender,
       recipient: attributes.recipient,
       vaultIndex: configuredVaultAddresses.indexOf(attributes.recipient),
-      amountBaseUnits: attributes.amount?.endsWith(config.NATIVE_TOKEN_DENOM) ? attributes.amount.slice(0, -config.NATIVE_TOKEN_DENOM.length) : '0',
+      amountBaseUnits: attributes.amount?.endsWith(config.TOKEN_DENOM) ? attributes.amount.slice(0, -config.TOKEN_DENOM.length) : '0',
       status: tx.tx_result.code === 0 ? 'Success' as const : 'Failed' as const,
       gasWanted: tx.tx_result.gas_wanted,
       gasUsed: tx.tx_result.gas_used,

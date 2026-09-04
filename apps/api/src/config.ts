@@ -14,18 +14,34 @@ const environmentSchema = z.object({
   CHAIN_TYPE: z.enum(['evm', 'cosmos-sdk', 'cosmwasm', 'other']).optional(),
   CHAIN_NAME: z.string().min(1).default('ZIGChain Testnet'),
   CHAIN_ID: z.string().min(1).default('zig-test-2'),
-  RPC_URL: z.url().default('https://testnet-rpc.zigchain.com'),
-  API_URL: z.url().default('https://testnet-api.zigchain.com'),
-  BLOCK_EXPLORER_URL: z.url().default('https://testnet.zigscan.org'),
+  RPC_URL: z.url().default('https://zigchain-mainnet-lcd.zigscan.net'),
+  API_URL: z.url().default('https://zigchain-mainnet-lcd.zigscan.net'),
+  BLOCK_EXPLORER_URL: z.url().default('https://zigscan.org'),
   NATIVE_TOKEN_SYMBOL: z.string().min(1).default('ZIG'),
   NATIVE_TOKEN_DENOM: z.string().min(1).default('uzig'),
   NATIVE_TOKEN_DECIMALS: z.coerce.number().int().nonnegative().max(255).default(6),
+  TOKEN_SYMBOL: z.string().min(1).default('ZIG'),
+  TOKEN_DENOM: z.string().min(1).default('uzig'),
+  TOKEN_DECIMALS: z.coerce.number().int().nonnegative().max(255).default(6),
+  IBC_SOURCE_PORT: z.string().trim().min(1).default('transfer'),
+  IBC_SOURCE_CHANNEL: z.string().trim().min(1).default('channel-3'),
+  IBC_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(600),
+  ORBITER_CCTP_ENABLED: z.stringbool().default(false),
+  ORBITER_FEE_RECIPIENT: z.string().trim().optional().default(''),
+  ORBITER_FEE_AMOUNT: z.string().trim().optional().default(''),
+  ORBITER_CCTP_DESTINATION_DOMAIN: z.coerce.number().int().nonnegative().default(0),
+  ORBITER_CCTP_MINT_RECIPIENT: z.string().trim().optional().default(''),
+  ORBITER_CCTP_DESTINATION_CALLER: z.string().trim().optional().default(''),
+  ORBITER_PASSTHROUGH_PAYLOAD: z.string().optional().default(''),
   VAULT_1_NAME: z.string().min(1).default('Stablecoin Yield'),
-  VAULT_1_ADDRESS: z.string().optional().default(''),
+  VAULT_1_ADDRESS: z.string().trim().optional().default(''),
+  VAULT_1_IBC_RECEIVER: z.string().trim().optional().default(''),
   VAULT_2_NAME: z.string().min(1).default('Opportunistic Credit'),
-  VAULT_2_ADDRESS: z.string().optional().default(''),
+  VAULT_2_ADDRESS: z.string().trim().optional().default(''),
+  VAULT_2_IBC_RECEIVER: z.string().trim().optional().default(''),
   VAULT_3_NAME: z.string().min(1).default('Core Income'),
-  VAULT_3_ADDRESS: z.string().optional().default(''),
+  VAULT_3_ADDRESS: z.string().trim().optional().default(''),
+  VAULT_3_IBC_RECEIVER: z.string().trim().optional().default(''),
   BACKEND_SIGNER_ENABLED: z.stringbool().default(false),
   ADMIN_EMAIL: z.email(),
   ADMIN_PASSWORD: z.string().min(1),
@@ -33,4 +49,8 @@ const environmentSchema = z.object({
 });
 
 export const config = environmentSchema.parse(process.env);
-export const vaultsConfigured = Boolean(config.VAULT_1_ADDRESS && config.VAULT_2_ADDRESS && config.VAULT_3_ADDRESS);
+export const vaultsConfigured = Boolean(
+  (config.VAULT_1_IBC_RECEIVER || config.VAULT_1_ADDRESS)
+  && (config.VAULT_2_IBC_RECEIVER || config.VAULT_2_ADDRESS)
+  && (config.VAULT_3_IBC_RECEIVER || config.VAULT_3_ADDRESS),
+);

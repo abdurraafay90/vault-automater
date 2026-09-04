@@ -122,6 +122,27 @@ body{background:#0b0e12;color:var(--text)}
 .history-row{border-color:#252b33}
 @media(max-width:760px){.amount-grid.single{grid-template-columns:1fr}.amount-grid.single .max-field{max-height:0}.delivery-mode{grid-template-columns:1fr}.frequency-options{flex-wrap:wrap}.custom-frequency{flex:1}}
 
+/* Vault details: keep dense information readable without changing the dashboard layout. */
+.vault-card .card-title p{font-size:12px;line-height:1.45}
+.vault-card .vault-nameplate{padding:19px 20px;gap:16px}
+.vault-card .vault-badge{width:48px;height:48px;font-size:12px}
+.vault-card .vault-nameplate small{font-size:10px;letter-spacing:.07em}
+.vault-card .vault-nameplate strong{margin-top:5px;font-size:16px;line-height:1.25}
+.vault-card .configured,.vault-card .not-configured{padding:8px 11px;font-size:9px;letter-spacing:.04em}
+.vault-card .vault-summary{margin-top:14px;font-size:12px;line-height:1.55}
+.vault-card .market-snapshot>div{padding:17px 16px}
+.vault-card .market-snapshot span{font-size:9px}
+.vault-card .market-snapshot strong{margin-top:7px;font-size:13px;line-height:1.3}
+.vault-card .snapshot-note{margin-top:9px;font-size:9px;line-height:1.45}
+.vault-card .detail-list>div{min-height:72px;padding:16px}
+.vault-card .detail-list span{font-size:9px;letter-spacing:.06em}
+.vault-card .detail-list strong,.vault-card .detail-list code{margin-top:8px;font-size:12px;line-height:1.4}
+.vault-card .detail-list code{overflow-wrap:anywhere}
+.vault-card .interface-banner{padding:16px;gap:13px}
+.vault-card .interface-banner>span{font-size:18px}
+.vault-card .interface-banner strong{font-size:10px;line-height:1.35}
+.vault-card .interface-banner small{margin-top:5px;font-size:10px;line-height:1.5}
+
 /* Synchronized wallet connection state. */
 .mode-switch button{display:flex;align-items:center;justify-content:center;gap:8px}
 .connected-mini{padding:3px 5px;border-radius:4px;background:rgba(85,168,121,.14);color:#76c99a;font-size:6px;letter-spacing:.06em}
@@ -165,3 +186,84 @@ body{background:#0b0e12;color:var(--text)}
 .tx-cell button:hover{border-color:#5a646f;background:#292c30;color:#d1d4d8}
 .tx-cell button.copied{border-color:#3f6a52;background:#18261e;color:#73bd91}
 .action-hint{margin:9px 2px 0;color:#c19a6f;font-size:8px;line-height:1.45}
+
+/* Global controls and wallet access: readable sizing for primary interactions. */
+.global-bar{padding:18px 20px}
+.global-bar>div:first-child{gap:14px}
+.global-icon{width:40px;height:40px;font-size:16px}
+.global-bar strong{font-size:14px;line-height:1.3}
+.global-bar small{margin-top:5px;font-size:11px;line-height:1.45}
+.global-buttons{gap:9px}
+.global-buttons button{height:38px;padding:0 16px;font-size:10px}
+
+.wallet-card .card-title p{font-size:12px;line-height:1.45}
+.wallet-card .mode-switch{margin-top:28px;padding:6px}
+.wallet-card .mode-switch button{height:44px;font-size:11px}
+.wallet-card .connected-mini{font-size:8px}
+.wallet-card .wallet-connect{min-height:330px}
+.wallet-card .wallet-connect h3{margin-top:21px;font-size:18px}
+.wallet-card .wallet-connect p{max-width:440px;font-size:13px;line-height:1.65}
+.wallet-card .wallet-connect>button{height:50px;font-size:12px}
+.wallet-card .wallet-connect>small{font-size:10px;line-height:1.4}
+.wallet-card .private-form label>span{font-size:10px}
+.wallet-card .private-form input{height:54px;font-size:13px}
+.wallet-card .warning-note{padding:15px;gap:12px}
+.wallet-card .warning-note>b{flex-basis:25px;height:25px;font-size:11px}
+.wallet-card .warning-note p{font-size:11px;line-height:1.6}
+.wallet-card .unlock-button{height:48px;font-size:11px}
+.wallet-card .form-error{font-size:11px}
+.wallet-card .connection-heading{padding:17px}
+.wallet-card .connection-heading small{font-size:9px}
+.wallet-card .connection-heading h3{font-size:16px}
+.wallet-card .connection-method{font-size:9px}
+.wallet-card .connected-account{grid-template-columns:120px minmax(0,1fr);padding:17px;gap:11px 14px}
+.wallet-card .connected-account span{font-size:9px}
+.wallet-card .connected-account code,.wallet-card .connected-account strong{font-size:12px}
+.wallet-card .connection-panel>p{font-size:11px;line-height:1.6}
+.wallet-card .disconnect-button{height:46px;font-size:10px}
+
+@media(max-width:520px){.wallet-card .connected-account{grid-template-columns:1fr}.global-buttons button{padding:0 10px}}
+
+/* Strategy and transaction history: larger type for configuration and review. */
+.strategy-card .card-title p,.history-card .card-title p{font-size:12px;line-height:1.45}
+.strategy-card .independent-pill{padding:9px 12px;font-size:9px}
+.strategy-card .delivery-mode button{min-height:70px;padding:13px 16px}
+.strategy-card .delivery-mode button strong{font-size:14px}
+.strategy-card .delivery-mode button small{margin-top:6px;font-size:10px;line-height:1.4}
+.strategy-card .direction-bar{height:64px}
+.strategy-card .direction-bar span{font-size:12px}
+.strategy-card .amount-grid label>span{font-size:10px}
+.strategy-card .amount-grid label>div{height:64px;padding:0 18px}
+.strategy-card .amount-grid input{font-size:14px}
+.strategy-card .amount-grid b{font-size:11px}
+.strategy-card .amount-note{padding:17px 18px;font-size:12px;line-height:1.55}
+.strategy-card .action-hint{font-size:10px;line-height:1.5}
+.strategy-card .transfer-status{font-size:11px;line-height:1.45}
+.strategy-card .transfer-status strong{font-size:10px}
+.strategy-card .frequency-row>div:first-child span{font-size:12px}
+.strategy-card .frequency-row>div:first-child small{font-size:10px}
+.strategy-card .frequency-options button{height:42px;font-size:11px}
+.strategy-card .custom-frequency input{font-size:11px}
+.strategy-card .custom-frequency span{font-size:10px}
+.strategy-card .execution-strip{min-height:88px;padding:16px 18px}
+.strategy-card .execution-strip>div:not(.strategy-actions){min-width:0;min-height:42px}
+.strategy-card .execution-strip>div:nth-child(2),.strategy-card .execution-strip>div:nth-child(3){display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:0}
+.strategy-card .execution-strip>div:first-child{align-self:center}
+.strategy-card .execution-strip small{font-size:9px}
+.strategy-card .execution-strip strong{font-size:11px}
+.strategy-card .strategy-actions button{height:42px;font-size:10px}
+
+.history-card .history-filters{padding:5px}
+.history-card .history-filters button{height:36px;padding:0 16px;font-size:10px}
+.history-card .table-head{padding:14px 16px;font-size:9px}
+.history-card .history-row{min-height:66px;font-size:11px}
+.history-card .history-row>span:first-child small{font-size:9px}
+.history-card .history-row>strong{font-size:11px}
+.history-card .history-status{padding:6px 9px;font-size:9px}
+.history-card .tx-cell code{font-size:10px}
+.history-card .history-empty{min-height:180px}
+.history-card .history-empty>span{width:48px;height:48px;font-size:17px}
+.history-card .history-empty strong{margin-top:15px;font-size:13px}
+.history-card .history-empty p{margin-top:7px;font-size:10px;line-height:1.5}
+
+@media(max-width:760px){.strategy-card .independent-pill{display:none}.history-card .history-filters button{padding:0 10px}}
