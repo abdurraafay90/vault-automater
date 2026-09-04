@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
     env_file: .env
     environment:
       DATABASE_URL: postgresql://vaultflow:vaultflow@postgres:5432/vaultflow
@@ -20,6 +21,7 @@ services:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
     env_file: .env
     environment:
       DATABASE_URL: postgresql://vaultflow:vaultflow@postgres:5432/vaultflow
@@ -35,6 +37,7 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
     env_file: .env
     environment:
       NODE_ENV: production
@@ -44,6 +47,7 @@ services:
 
   postgres:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: vaultflow
       POSTGRES_USER: vaultflow
@@ -57,6 +61,7 @@ services:
       retries: 10
   redis:
     image: redis:7.4-alpine
+    restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports: ["6379:6379"]
     volumes: ["vaultflow_redis:/data"]

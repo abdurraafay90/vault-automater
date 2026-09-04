@@ -30,6 +30,16 @@ database.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS sessions_token_idx ON sessions(token_hash, expires_at);
+  CREATE TABLE IF NOT EXISTS custom_vaults (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    address TEXT NOT NULL,
+    chain_type TEXT NOT NULL,
+    token_symbol TEXT NOT NULL,
+    token_decimals INTEGER NOT NULL,
+    summary TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
 `);
 
 function normalizeEmail(email: string) { return email.trim().toLowerCase(); }
@@ -103,4 +113,41 @@ export function createUser(email: string, password: string): AuthUser {
   database.prepare('INSERT INTO users (id, email, password_hash, role, active, created_at) VALUES (?, ?, ?, ?, 1, ?)')
     .run(id, normalizeEmail(email), passwordHash(password), 'USER', createdAt);
   return { id, email: normalizeEmail(email), role: 'USER', active: true, createdAt };
+}
+
+export type CustomVault = {
+  id: string;
+  name: string;
+  address: string;
+  chainType: 'zigchain' | 'erc';
+  tokenSymbol: string;
+  tokenDecimals: number;
+  summary: string;
+  createdAt: string;
+};
+
+export function listCustomVaults(): CustomVault[] {
+  return (database.prepare('SELECT id, name, address, chain_type, token_symbol, token_decimals, summary, created_at FROM custom_vaults ORDER BY created_at ASC').all() as Record<string, unknown>[]).map((row) => ({
+    id: String(row.id),
+    name: String(row.name),
+    address: String(row.address),
+    chainType: (row.chain_type === 'erc' ? 'erc' : 'zigchain') as 'zigchain' | 'erc',
+    tokenSymbol: String(row.token_symbol || (row.chain_type === 'erc' ? 'ETH' : 'ZIG')),
+    tokenDecimals: Number(row.token_decimals || (row.chain_type === 'erc' ? 18 : 6)),
+    summary: String(row.summary || ''),
+    createdAt: String(row.created_at),
+  }));
+}
+
+export function createCustomVault(data: { name: string; address: string; chainType: 'zigchain' | 'erc'; tokenSymbol?: string | undefined; tokenDecimals?: number | undefined; summary?: string | undefined }): CustomVault {
+  const id = `vault-${randomUUID()}`;
+  const createdAt = new Date().toISOString();
+  const tokenSymbol = data.tokenSymbol || (data.chainType === 'erc' ? 'ETH' : 'ZIG');
+  const tokenDecimals = data.tokenDecimals ?? (data.chainType === 'erc' ? 18 : 6);
+  const summary = data.summary || `${data.chainType === 'erc' ? 'ERC / EVM' : 'ZIGChain'} custom strategy`;
+  database.prepare(`
+    INSERT INTO custom_vaults (id, name, address, chain_type, token_symbol, token_decimals, summary, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, data.name.trim(), data.address.trim(), data.chainType, tokenSymbol, tokenDecimals, summary, createdAt);
+  return { id, name: data.name.trim(), address: data.address.trim(), chainType: data.chainType, tokenSymbol, tokenDecimals, summary, createdAt };
 }

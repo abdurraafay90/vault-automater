@@ -20,21 +20,13 @@ COPY packages/blockchain-cosmos/package.json packages/blockchain-cosmos/package.
 
 RUN npm ci
 
-FROM deps AS build
-COPY tsconfig.base.json ./
-COPY packages/shared packages/shared
-COPY apps/web apps/web
-
-RUN npm run build -w @vaultflow/web
-
-FROM node:22-alpine AS runtime
+FROM deps AS runtime
 ENV NODE_ENV=production
 WORKDIR /repo
 
-COPY --from=build /repo/node_modules ./node_modules
-COPY --from=build /repo/package.json ./package.json
-COPY --from=build /repo/packages/shared ./packages/shared
-COPY --from=build /repo/apps/web ./apps/web
+COPY tsconfig.base.json ./
+COPY packages/shared packages/shared
+COPY apps/web apps/web
 
 WORKDIR /repo/apps/web
 EXPOSE 4560

@@ -4,7 +4,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { authenticate, createSession, createUser, ensureAdmin, listUsers, revokeSession, type AuthUser, userForSession } from './auth-store.js';
+import { authenticate, createCustomVault, createSession, createUser, ensureAdmin, listCustomVaults, listUsers, revokeSession, type AuthUser, userForSession } from './auth-store.js';
 import { config, vaultsConfigured } from './config.js';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization', 'req.headers.cookie', '*.privateKey', '*.mnemonic', '*.secret'] } });
@@ -22,7 +22,7 @@ function currentUser(request: FastifyRequest) { return requestUsers.get(request)
 
 app.addHook('preHandler', async (request, reply) => {
   const path = request.url.split('?')[0] ?? request.url;
-  if (!path.startsWith('/api/') || path === '/api/auth/login') return;
+  if (!path.startsWith('/api/') || path === '/api/auth/login' || path === '/api/config/public' || path === '/api/vaults/custom') return;
   const token = request.cookies[SESSION_COOKIE];
   const user = token ? userForSession(token) : null;
   if (!user) return reply.code(401).send({ code: 'AUTHENTICATION_REQUIRED' });
@@ -38,10 +38,12 @@ app.post('/api/auth/login', { config: { rateLimit: { max: 10, timeWindow: '1 min
   const user = authenticate(input.data.email, input.data.password);
   if (!user) return reply.code(401).send({ code: 'INVALID_EMAIL_OR_PASSWORD' });
   const session = createSession(user.id, config.SESSION_TTL_SECONDS);
+  const isSecure = process.env.COOKIE_SECURE === 'true' || (process.env.COOKIE_SECURE !== 'false' && process.env.NODE_ENV === 'production' && !config.APP_ORIGIN.startsWith('http://localhost'));
+  const sameSite = (process.env.COOKIE_SAMESITE as 'strict' | 'lax' | 'none') || 'lax';
   reply.setCookie(SESSION_COOKIE, session.token, {
     httpOnly: true,
-    sameSite: 'strict',
-    secure: process.env.NODE_ENV === 'production',
+    sameSite,
+    secure: isSecure,
     path: '/',
     maxAge: config.SESSION_TTL_SECONDS,
   });
@@ -74,8 +76,30 @@ app.post('/api/admin/users', async (request, reply) => {
   }
 });
 
+app.get('/api/vaults/custom', async () => ({ vaults: listCustomVaults() }));
+
+app.post('/api/vaults/custom', async (request, reply) => {
+  const input = z.object({
+    name: z.string().min(1).max(64),
+    address: z.string().min(1).max(128),
+    chainType: z.enum(['zigchain', 'erc']),
+    tokenSymbol: z.string().min(1).max(16).optional(),
+    tokenDecimals: z.coerce.number().int().min(0).max(255).optional(),
+    summary: z.string().max(256).optional(),
+  }).safeParse(request.body);
+  if (!input.success) return reply.code(400).send({ code: 'INVALID_VAULT_PAYLOAD' });
+  const vault = createCustomVault(input.data);
+  return reply.code(201).send({ vault });
+});
+
 app.get('/api/config/public', async () => ({
   chain: { type: config.CHAIN_TYPE ?? 'cosmos-sdk', name: config.CHAIN_NAME, id: config.CHAIN_ID, rpcUrl: config.RPC_URL, apiUrl: config.API_URL, explorerUrl: config.BLOCK_EXPLORER_URL },
+  evm: {
+    rpcUrl: config.EVM_RPC_URL,
+    chainId: config.EVM_CHAIN_ID,
+    explorerUrl: config.EVM_EXPLORER_URL,
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  },
   nativeToken: { symbol: config.NATIVE_TOKEN_SYMBOL, denom: config.NATIVE_TOKEN_DENOM, decimals: config.NATIVE_TOKEN_DECIMALS },
   token: { symbol: config.TOKEN_SYMBOL, denom: config.TOKEN_DENOM, decimals: config.TOKEN_DECIMALS },
   ibcTransfer: {
@@ -93,12 +117,14 @@ app.get('/api/config/public', async () => ({
     },
   },
   vaults: [
-    { id: 'vault-1', name: config.VAULT_1_NAME, address: config.VAULT_1_IBC_RECEIVER || config.VAULT_1_ADDRESS || null },
-    { id: 'vault-2', name: config.VAULT_2_NAME, address: config.VAULT_2_IBC_RECEIVER || config.VAULT_2_ADDRESS || null },
-    { id: 'vault-3', name: config.VAULT_3_NAME, address: config.VAULT_3_IBC_RECEIVER || config.VAULT_3_ADDRESS || null },
+    { id: 'vault-1', name: config.VAULT_1_NAME, address: config.VAULT_1_IBC_RECEIVER || config.VAULT_1_ADDRESS || null, chainType: 'zigchain' },
+    { id: 'vault-2', name: config.VAULT_2_NAME, address: config.VAULT_2_IBC_RECEIVER || config.VAULT_2_ADDRESS || null, chainType: 'zigchain' },
+    { id: 'vault-3', name: config.VAULT_3_NAME, address: config.VAULT_3_IBC_RECEIVER || config.VAULT_3_ADDRESS || null, chainType: 'zigchain' },
+    { id: 'vault-4', name: config.VAULT_4_NAME, address: config.VAULT_4_ADDRESS, chainType: config.VAULT_4_CHAIN_TYPE },
+    { id: 'vault-5', name: config.VAULT_5_NAME, address: config.VAULT_5_ADDRESS, chainType: config.VAULT_5_CHAIN_TYPE },
   ],
   blockchainStatus: vaultsConfigured ? 'READY' : 'VAULT_ADDRESSES_NOT_CONFIGURED',
-  walletModes: ['browser-wallet', 'manual-interactive'],
+  walletModes: ['private-key'],
   backendSignerEnabled: config.BACKEND_SIGNER_ENABLED,
 }));
 

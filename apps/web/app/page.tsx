@@ -1,19 +1,30 @@
 'use client';
 
 import { DirectSecp256k1HdWallet, DirectSecp256k1Wallet, type EncodeObject, type OfflineSigner } from '@cosmjs/proto-signing';
-import { GasPrice, SigningStargateClient } from '@cosmjs/stargate';
+import { GasPrice, SigningStargateClient, coin } from '@cosmjs/stargate';
+import { ethers } from 'ethers';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
-type KeplrProvider = {
-  experimentalSuggestChain(config: object): Promise<void>;
-  enable(chainId: string): Promise<void>;
-  disable?(chainId: string): Promise<void>;
-  getKey(chainId: string): Promise<{ bech32Address: string }>;
-  getOfflineSigner?(chainId: string): OfflineSigner;
+export type ChainType = 'zigchain' | 'erc';
+
+export type Vault = {
+  id?: string;
+  pair: string;
+  name: string;
+  address: string | null;
+  chainType: ChainType;
+  accent: 'blue' | 'purple' | 'orange' | 'green' | 'cyan';
+  tvl: string;
+  apy: string;
+  type: string;
+  risk: string;
+  summary: string;
+  tokenSymbol?: string;
+  tokenDecimals?: number;
 };
-type BrowserWalletWindow = typeof window & { keplr?: KeplrProvider; getOfflineSignerAuto?(chainId: string): Promise<OfflineSigner>; getOfflineSigner?(chainId: string): OfflineSigner };
-type Vault = { pair: string; name: string; address: string | null; accent: 'blue' | 'purple' | 'orange'; tvl: string; apy: string; type: string; risk: string; summary: string };
+
 type ChainConfig = { name: string; id: string; rpcUrl: string; apiUrl: string; explorerUrl: string };
+type EvmConfig = { rpcUrl: string; chainId: number; explorerUrl: string; nativeCurrency?: { name: string; symbol: string; decimals: number } };
 type TokenConfig = { symbol: string; denom: string; decimals: number };
 type IbcTransferConfig = {
   sourcePort: string;
@@ -29,33 +40,56 @@ type IbcTransferConfig = {
     passthroughPayload: string;
   };
 };
+
 type AutomationStatus = 'stopped' | 'running' | 'paused';
 type DeliveryMode = 'once' | 'automation';
-type SessionSource = 'browser' | 'private';
 type Automation = { mode: DeliveryMode; minimum: string; maximum: string; interval: number; customInterval: string; status: AutomationStatus; lastAt: number | null; nextAt: number | null };
 type HistoryStatus = 'Pending' | 'Success' | 'Failed';
 type HistoryEntry = { id: string; vaultIndex: number; time: number; amountBaseUnits: bigint; status: HistoryStatus; hash?: string; error?: string; source: 'Manual' | 'Automation' | 'Chain' };
 type AuthUser = { id: string; email: string; role: 'ADMIN' | 'USER'; active: boolean; createdAt: string };
-// Each vault tab owns its own signer, address, and balance — vaults are never forced to share one wallet.
-type WalletSession = { mode: 'wallet' | 'private'; source: SessionSource | null; address: string; manualAddress: string; balanceBaseUnits: string; nativeGasBaseUnits: string; error: string; connecting: boolean; unlocking: boolean; hasSigner: boolean };
+type WalletSession = { mode: 'private'; source: 'private' | null; address: string; manualAddress: string; balanceBaseUnits: string; nativeGasBaseUnits: string; error: string; connecting: boolean; unlocking: boolean; hasSigner: boolean };
 
-const defaultChainConfig: ChainConfig = { name: 'ZIGChain Testnet', id: 'zig-test-2', rpcUrl: 'https://testnet-rpc.zigchain.com', apiUrl: 'https://testnet-api.zigchain.com', explorerUrl: 'https://testnet.zigscan.org' };
+type UniversalSigner =
+  | { type: 'cosmos'; signer: OfflineSigner }
+  | { type: 'evm'; wallet: ethers.Wallet; provider: ethers.JsonRpcProvider };
+
+const defaultChainConfig: ChainConfig = {
+  name: 'ZIGChain Testnet',
+  id: 'zig-test-2',
+  rpcUrl: 'https://testnet-rpc.zigchain.com',
+  apiUrl: 'https://testnet-api.zigchain.com',
+  explorerUrl: 'https://testnet.zigscan.org',
+};
+
+const defaultEvmConfig: EvmConfig = {
+  rpcUrl: 'https://rpc.testnet.zigchain.com',
+  chainId: 11155111,
+  explorerUrl: 'https://testnet.zigscan.org',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+};
+
 const defaultTokenConfig: TokenConfig = { symbol: 'ZIG', denom: 'uzig', decimals: 6 };
+
 const defaultIbcTransferConfig: IbcTransferConfig = {
   sourcePort: 'transfer',
   sourceChannel: 'channel-3',
   timeoutSeconds: 600,
   orbiter: { enabled: false, feeRecipient: '', feeAmount: '', destinationDomain: 0, mintRecipient: '', destinationCaller: '', passthroughPayload: '' },
 };
+
 const defaultVaults: Vault[] = [
-  { pair: 'PAIR 1', name: 'Stablecoin Yield', address: 'Not configured', accent: 'blue', tvl: '$39,717,012', apy: '9.95%', type: 'Stablecoin Yield', risk: 'Low', summary: 'Low-risk stablecoin strategy' },
-  { pair: 'PAIR 2', name: 'Opportunistic Credit', address: 'Not configured', accent: 'purple', tvl: '$16,679,657', apy: '10.32%', type: 'Opportunistic', risk: 'Low', summary: 'Diversified private credit strategy' },
-  { pair: 'PAIR 3', name: 'Core Income', address: 'Not configured', accent: 'orange', tvl: '$11,329,834', apy: '8.03%', type: 'Core Income', risk: 'Low', summary: 'Lower-volatility private credit strategy' },
+  { pair: 'PAIR 1', name: 'Stablecoin Yield', address: 'Not configured', chainType: 'zigchain', accent: 'blue', tvl: '$39,717,012', apy: '9.95%', type: 'Stablecoin Yield', risk: 'Low', summary: 'Low-risk stablecoin strategy on ZIGChain' },
+  { pair: 'PAIR 2', name: 'Opportunistic Credit', address: 'Not configured', chainType: 'zigchain', accent: 'purple', tvl: '$16,679,657', apy: '10.32%', type: 'Opportunistic', risk: 'Low', summary: 'Diversified private credit strategy on ZIGChain' },
+  { pair: 'PAIR 3', name: 'Core Income', address: 'Not configured', chainType: 'zigchain', accent: 'orange', tvl: '$11,329,834', apy: '8.03%', type: 'Core Income', risk: 'Low', summary: 'Lower-volatility private credit strategy on ZIGChain' },
+  { pair: 'ERC 1', name: 'Nawa Finance', address: '0x6FE78B942C566fE2b8D0881cf3577C1B1511F204', chainType: 'erc', accent: 'green', tvl: '$24,850,000', apy: '12.40%', type: 'Shariah Ethical Yield', risk: 'Low', summary: 'Shariah-compliant ethical asset-backed yield vault', tokenSymbol: 'ETH', tokenDecimals: 18 },
+  { pair: 'ERC 2', name: 'Valdora', address: '0x1754fCD1F0EBb306286dd16F00abCf46731a92FC', chainType: 'erc', accent: 'cyan', tvl: '$18,320,000', apy: '11.85%', type: 'Liquid Staking & Yield', risk: 'Medium', summary: 'Composable institutional liquid staking & yield vault', tokenSymbol: 'ETH', tokenDecimals: 18 },
 ];
+
 const intervals = [
   { label: '30s', value: 30 }, { label: '60s', value: 60 }, { label: '5m', value: 300 },
   { label: '15m', value: 900 }, { label: '30m', value: 1800 }, { label: '60m', value: 3600 },
 ];
+
 const API_URL = 'http://localhost:4000';
 const GAS_MULTIPLIER = 1.5;
 const BIGINT_ZERO = BigInt(0);
@@ -109,12 +143,12 @@ function formatCountdown(nextAt: number | null, now: number) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function initialAutomations(): Automation[] {
-  return defaultVaults.map(() => ({ mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null }));
+function createInitialAutomations(count: number): Automation[] {
+  return Array.from({ length: count }, () => ({ mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null }));
 }
 
-function initialWalletSessions(): WalletSession[] {
-  return defaultVaults.map(() => ({ mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false }));
+function createInitialWalletSessions(count: number): WalletSession[] {
+  return Array.from({ length: count }, () => ({ mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false }));
 }
 
 function unixNow() { return Date.now(); }
@@ -133,12 +167,13 @@ function hasValidRange(settings: Automation, decimals = defaultTokenConfig.decim
 export default function Home() {
   const [vaults, setVaults] = useState<Vault[]>(defaultVaults);
   const [chainConfig, setChainConfig] = useState<ChainConfig>(defaultChainConfig);
+  const [evmConfig, setEvmConfig] = useState<EvmConfig>(defaultEvmConfig);
   const [transferToken, setTransferToken] = useState<TokenConfig>(defaultTokenConfig);
   const [nativeToken, setNativeToken] = useState<TokenConfig>(defaultTokenConfig);
   const [ibcTransfer, setIbcTransfer] = useState<IbcTransferConfig>(defaultIbcTransferConfig);
-  const [automations, setAutomations] = useState<Automation[]>(initialAutomations);
+  const [automations, setAutomations] = useState<Automation[]>(() => createInitialAutomations(defaultVaults.length));
   const [selectedVault, setSelectedVault] = useState(0);
-  const [walletSessions, setWalletSessions] = useState<WalletSession[]>(initialWalletSessions);
+  const [walletSessions, setWalletSessions] = useState<WalletSession[]>(() => createInitialWalletSessions(defaultVaults.length));
   const [historyFilter, setHistoryFilter] = useState('All');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [sendingVaults, setSendingVaults] = useState<number[]>([]);
@@ -158,22 +193,40 @@ export default function Home() {
   const [creatingUser, setCreatingUser] = useState(false);
   const [copiedHash, setCopiedHash] = useState('');
 
+  // Add Vault Modal & Sidebar State
+  const [addVaultOpen, setAddVaultOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarFilter, setSidebarFilter] = useState<'all' | 'zigchain' | 'erc'>('all');
+  const [newVaultName, setNewVaultName] = useState('');
+  const [newVaultChain, setNewVaultChain] = useState<ChainType>('zigchain');
+  const [newVaultAddress, setNewVaultAddress] = useState('');
+  const [newVaultSummary, setNewVaultSummary] = useState('');
+  const [newVaultSymbol, setNewVaultSymbol] = useState('');
+  const [newVaultDecimals, setNewVaultDecimals] = useState('');
+  const [addVaultError, setAddVaultError] = useState('');
+  const [savingVault, setSavingVault] = useState(false);
+
   const secretInputRef = useRef<HTMLInputElement>(null);
-  const signersRef = useRef<Array<OfflineSigner | null>>([null, null, null]);
+  const signersRef = useRef<Record<number, UniversalSigner | null>>({});
   const walletSessionsRef = useRef<WalletSession[]>(walletSessions);
   const vaultsRef = useRef<Vault[]>(defaultVaults);
   const chainConfigRef = useRef<ChainConfig>(defaultChainConfig);
+  const evmConfigRef = useRef<EvmConfig>(defaultEvmConfig);
   const transferTokenRef = useRef<TokenConfig>(defaultTokenConfig);
   const nativeTokenRef = useRef<TokenConfig>(defaultTokenConfig);
   const ibcTransferRef = useRef<IbcTransferConfig>(defaultIbcTransferConfig);
   const automationsRef = useRef<Automation[]>(automations);
-  const timersRef = useRef<Array<ReturnType<typeof setTimeout> | null>>([null, null, null]);
-  const transferQueueRef = useRef<Array<Promise<boolean>>>([Promise.resolve(true), Promise.resolve(true), Promise.resolve(true)]);
-  const sessionGenerationRef = useRef<number[]>([0, 0, 0]);
+  const timersRef = useRef<Record<number, ReturnType<typeof setTimeout> | null>>({});
+  const transferQueueRef = useRef<Record<number, Promise<boolean>>>({});
+  const sessionGenerationRef = useRef<Record<number, number>>({});
 
-  const vault = vaults[selectedVault];
-  const automation = automations[selectedVault];
-  const walletSession = walletSessions[selectedVault];
+  const vault = vaults[selectedVault] ?? vaults[0];
+  const automation = automations[selectedVault] ?? { mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null };
+  const walletSession = walletSessions[selectedVault] ?? { mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false };
+
+  const currentTokenSymbol = vault?.tokenSymbol || (vault?.chainType === 'erc' ? 'ETH' : transferToken.symbol);
+  const currentTokenDecimals = vault?.tokenDecimals ?? (vault?.chainType === 'erc' ? 18 : transferToken.decimals);
+
   const selectedHistory = useMemo(() => history.filter((entry) => entry.vaultIndex === selectedVault && (historyFilter === 'All' || entry.status === historyFilter)), [history, historyFilter, selectedVault]);
   const successfulHistory = history.filter((entry) => entry.vaultIndex === selectedVault && entry.status === 'Success');
   const totalTransferred = successfulHistory.reduce((sum, entry) => sum + entry.amountBaseUnits, BIGINT_ZERO);
@@ -201,9 +254,21 @@ export default function Home() {
     const ticker = window.setInterval(() => setNow(unixNow()), 1000);
     return () => {
       window.clearInterval(ticker);
-      timers.forEach((timer) => timer && clearTimeout(timer));
+      Object.values(timers).forEach((timer) => timer && clearTimeout(timer));
     };
   }, []);
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        if (addVaultOpen) setAddVaultOpen(false);
+        else if (sidebarOpen) setSidebarOpen(false);
+        else if (adminOpen) setAdminOpen(false);
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [addVaultOpen, sidebarOpen, adminOpen]);
 
   function patchAutomation(index: number, patch: Partial<Automation>) {
     const next = automationsRef.current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
@@ -224,48 +289,130 @@ export default function Home() {
   }
 
   async function loadPublicConfig() {
-    const response = await apiRequest('/api/config/public');
-    if (!response.ok) throw new Error('Configuration service unavailable.');
-    const data = await response.json() as {
-      chain?: ChainConfig;
-      nativeToken?: TokenConfig;
-      token?: TokenConfig;
-      ibcTransfer?: IbcTransferConfig;
-      vaults: Array<{ name: string; address: string | null }>;
-    };
-    const nextChainConfig = data.chain ?? defaultChainConfig;
-    const nextTransferToken = data.token ?? defaultTokenConfig;
-    const nextNativeToken = data.nativeToken ?? defaultTokenConfig;
-    const nextIbcTransfer = data.ibcTransfer ?? defaultIbcTransferConfig;
-    const configured = defaultVaults.map((item, index) => ({ ...item, name: data.vaults[index]?.name ?? item.name, address: data.vaults[index]?.address ?? null }));
-    chainConfigRef.current = nextChainConfig;
-    transferTokenRef.current = nextTransferToken;
-    nativeTokenRef.current = nextNativeToken;
-    ibcTransferRef.current = nextIbcTransfer;
-    vaultsRef.current = configured;
-    setChainConfig(nextChainConfig);
-    setTransferToken(nextTransferToken);
-    setNativeToken(nextNativeToken);
-    setIbcTransfer(nextIbcTransfer);
-    setVaults(configured);
+    try {
+      const response = await apiRequest('/api/config/public');
+      if (!response.ok) throw new Error('Configuration service unavailable.');
+      const data = await response.json() as {
+        chain?: ChainConfig;
+        evm?: EvmConfig;
+        nativeToken?: TokenConfig;
+        token?: TokenConfig;
+        ibcTransfer?: IbcTransferConfig;
+        vaults: Array<{ name: string; address: string | null; chainType?: ChainType }>;
+      };
+
+      const nextChainConfig = data.chain ?? defaultChainConfig;
+      const nextEvmConfig = data.evm ?? defaultEvmConfig;
+      const nextTransferToken = data.token ?? defaultTokenConfig;
+      const nextNativeToken = data.nativeToken ?? defaultTokenConfig;
+      const nextIbcTransfer = data.ibcTransfer ?? defaultIbcTransferConfig;
+
+      // Base vaults updated with backend configuration
+      const baseVaults: Vault[] = defaultVaults.map((item, index) => ({
+        ...item,
+        name: data.vaults?.[index]?.name ?? item.name,
+        address: data.vaults?.[index]?.address ?? item.address,
+        chainType: (data.vaults?.[index]?.chainType ?? item.chainType) as ChainType,
+      }));
+
+      // Load custom vaults from backend and local storage
+      let customVaults: Vault[] = [];
+      try {
+        const customRes = await apiRequest('/api/vaults/custom');
+        if (customRes.ok) {
+          const customData = await customRes.json() as { vaults: Array<{ id: string; name: string; address: string; chainType: ChainType; tokenSymbol?: string; tokenDecimals?: number; summary?: string }> };
+          customVaults = customData.vaults.map((cv, i) => ({
+            id: cv.id,
+            pair: cv.chainType === 'erc' ? `ERC ${i + 3}` : `CUSTOM ${i + 1}`,
+            name: cv.name,
+            address: cv.address,
+            chainType: cv.chainType,
+            accent: cv.chainType === 'erc' ? 'cyan' : 'blue',
+            tvl: '$0',
+            apy: '—',
+            type: 'Custom Vault',
+            risk: 'Medium',
+            summary: cv.summary || 'Custom user vault',
+            tokenSymbol: cv.tokenSymbol,
+            tokenDecimals: cv.tokenDecimals,
+          }));
+        }
+      } catch {}
+
+      // Fallback/merge from localStorage
+      try {
+        const localCustom = JSON.parse(localStorage.getItem('vaultflow_custom_vaults') || '[]') as Vault[];
+        localCustom.forEach((lv) => {
+          if (!customVaults.some((cv) => cv.address === lv.address)) {
+            customVaults.push(lv);
+          }
+        });
+      } catch {}
+
+      const allVaults = [...baseVaults, ...customVaults];
+      chainConfigRef.current = nextChainConfig;
+      evmConfigRef.current = nextEvmConfig;
+      transferTokenRef.current = nextTransferToken;
+      nativeTokenRef.current = nextNativeToken;
+      ibcTransferRef.current = nextIbcTransfer;
+      vaultsRef.current = allVaults;
+
+      setChainConfig(nextChainConfig);
+      setEvmConfig(nextEvmConfig);
+      setTransferToken(nextTransferToken);
+      setNativeToken(nextNativeToken);
+      setIbcTransfer(nextIbcTransfer);
+      setVaults(allVaults);
+
+      // Expand automations and sessions if more vaults loaded
+      setAutomations((cur) => cur.length < allVaults.length ? [...cur, ...createInitialAutomations(allVaults.length - cur.length)] : cur);
+      setWalletSessions((cur) => cur.length < allVaults.length ? [...cur, ...createInitialWalletSessions(allVaults.length - cur.length)] : cur);
+    } catch {}
   }
 
-  async function loadBalance(index: number, address: string, generation = sessionGenerationRef.current[index]) {
-    const transferDenom = transferTokenRef.current.denom;
-    const gasDenom = nativeTokenRef.current.denom;
-    const [transferResponse, gasResponse] = await Promise.all([
-      apiRequest(`/api/wallet/${encodeURIComponent(address)}/balance?denom=${encodeURIComponent(transferDenom)}`),
-      transferDenom === gasDenom
-        ? Promise.resolve(null)
-        : apiRequest(`/api/wallet/${encodeURIComponent(address)}/balance?denom=${encodeURIComponent(gasDenom)}`),
-    ]);
-    if (!transferResponse.ok || (gasResponse && !gasResponse.ok)) throw new Error('Wallet opened, but balances could not be loaded.');
-    const transferBalance = await transferResponse.json() as { amountBaseUnits: string };
-    const gasBalance = gasResponse ? await gasResponse.json() as { amountBaseUnits: string } : transferBalance;
-    if (generation === sessionGenerationRef.current[index]) patchWalletSession(index, { balanceBaseUnits: transferBalance.amountBaseUnits, nativeGasBaseUnits: gasBalance.amountBaseUnits });
+  async function loadBalance(index: number, address: string, generation = sessionGenerationRef.current[index] ?? 0) {
+    const currentVault = vaultsRef.current[index];
+    if (!currentVault) return;
+
+    if (currentVault.chainType === 'erc') {
+      try {
+        const provider = new ethers.JsonRpcProvider(evmConfigRef.current.rpcUrl);
+        const balanceWei = await provider.getBalance(address);
+        const baseUnits = balanceWei.toString();
+        if (generation === (sessionGenerationRef.current[index] ?? 0)) {
+          patchWalletSession(index, { balanceBaseUnits: baseUnits, nativeGasBaseUnits: baseUnits });
+        }
+      } catch {
+        // Leave existing balance if EVM RPC is unreachable
+      }
+      return;
+    }
+
+    // Cosmos / ZIGChain
+    try {
+      const transferDenom = transferTokenRef.current.denom;
+      const gasDenom = nativeTokenRef.current.denom;
+      const [transferResponse, gasResponse] = await Promise.all([
+        apiRequest(`/api/wallet/${encodeURIComponent(address)}/balance?denom=${encodeURIComponent(transferDenom)}`),
+        transferDenom === gasDenom
+          ? Promise.resolve(null)
+          : apiRequest(`/api/wallet/${encodeURIComponent(address)}/balance?denom=${encodeURIComponent(gasDenom)}`),
+      ]);
+      if (!transferResponse.ok || (gasResponse && !gasResponse.ok)) return;
+      const transferBalance = await transferResponse.json() as { amountBaseUnits: string };
+      const gasBalance = gasResponse ? await gasResponse.json() as { amountBaseUnits: string } : transferBalance;
+      if (generation === (sessionGenerationRef.current[index] ?? 0)) {
+        patchWalletSession(index, { balanceBaseUnits: transferBalance.amountBaseUnits, nativeGasBaseUnits: gasBalance.amountBaseUnits });
+      }
+    } catch {}
   }
 
-  async function loadHistory(index: number, address: string, generation = sessionGenerationRef.current[index]) {
+  async function loadHistory(index: number, address: string, generation = sessionGenerationRef.current[index] ?? 0) {
+    const currentVault = vaultsRef.current[index];
+    if (currentVault?.chainType === 'erc') {
+      // EVM history is recorded locally from transactions
+      return;
+    }
     try {
       const response = await apiRequest(`/api/wallet/${encodeURIComponent(address)}/transactions?limit=50`);
       if (!response.ok) return;
@@ -281,80 +428,63 @@ export default function Home() {
           hash: transaction.hash,
           source: 'Chain',
         }));
-      if (generation !== sessionGenerationRef.current[index]) return;
+      if (generation !== (sessionGenerationRef.current[index] ?? 0)) return;
       setHistory((current) => {
         const chainHashes = new Set(chainHistory.map((entry) => entry.hash));
         const localOnly = current.filter((entry) => !entry.hash || !chainHashes.has(entry.hash));
         return [...localOnly, ...chainHistory].sort((left, right) => right.time - left.time).slice(0, 100);
       });
-    } catch {
-      // Live session history remains available if chain history is temporarily unavailable.
-    }
-  }
-
-  async function connectKeplr(index: number) {
-    const generation = sessionGenerationRef.current[index];
-    patchWalletSession(index, { connecting: true, error: '' });
-    try {
-      const browserWallet = window as BrowserWalletWindow;
-      const keplr = browserWallet.keplr;
-      if (!keplr) throw new Error('Install the Keplr browser extension to connect.');
-      const activeChain = chainConfigRef.current;
-      const activeNativeToken = nativeTokenRef.current;
-      const activeTransferToken = transferTokenRef.current;
-      await keplr.experimentalSuggestChain({
-        chainId: activeChain.id,
-        chainName: activeChain.name,
-        rpc: activeChain.rpcUrl,
-        rest: activeChain.apiUrl,
-        bip44: { coinType: 118 },
-        bech32Config: { bech32PrefixAccAddr: 'zig', bech32PrefixAccPub: 'zigpub', bech32PrefixValAddr: 'zigvaloper', bech32PrefixValPub: 'zigvaloperpub', bech32PrefixConsAddr: 'zigvalcons', bech32PrefixConsPub: 'zigvalconspub' },
-        currencies: [
-          { coinDenom: activeNativeToken.symbol, coinMinimalDenom: activeNativeToken.denom, coinDecimals: activeNativeToken.decimals },
-          ...(activeTransferToken.denom === activeNativeToken.denom ? [] : [{ coinDenom: activeTransferToken.symbol, coinMinimalDenom: activeTransferToken.denom, coinDecimals: activeTransferToken.decimals }]),
-        ],
-        feeCurrencies: [{ coinDenom: activeNativeToken.symbol, coinMinimalDenom: activeNativeToken.denom, coinDecimals: activeNativeToken.decimals, gasPriceStep: { low: 0.0025, average: 0.025, high: 0.05 } }],
-        stakeCurrency: { coinDenom: activeNativeToken.symbol, coinMinimalDenom: activeNativeToken.denom, coinDecimals: activeNativeToken.decimals },
-      });
-      await keplr.enable(activeChain.id);
-      const key = await keplr.getKey(activeChain.id);
-      const signer = browserWallet.getOfflineSignerAuto
-        ? await browserWallet.getOfflineSignerAuto(activeChain.id)
-        : browserWallet.getOfflineSigner?.(activeChain.id) ?? keplr.getOfflineSigner?.(activeChain.id);
-      if (!signer) throw new Error('Keplr connected, but its transaction signer is unavailable. Refresh the extension and try again.');
-      const [signerAccount] = await signer.getAccounts();
-      if (!signerAccount || signerAccount.address !== key.bech32Address) throw new Error('Keplr returned a signer for a different account.');
-      await loadBalance(index, key.bech32Address, generation);
-      if (generation !== sessionGenerationRef.current[index]) return;
-      signersRef.current[index] = signer;
-      patchWalletSession(index, { source: 'browser', address: key.bech32Address, hasSigner: true });
-      void loadHistory(index, key.bech32Address, generation);
-    } catch (error) {
-      patchWalletSession(index, { error: error instanceof Error ? error.message : 'Wallet connection failed.' });
-    } finally {
-      patchWalletSession(index, { connecting: false });
-    }
+    } catch {}
   }
 
   async function unlockManualSession(index: number) {
-    const generation = sessionGenerationRef.current[index];
+    const generation = (sessionGenerationRef.current[index] ?? 0) + 1;
+    sessionGenerationRef.current[index] = generation;
     patchWalletSession(index, { unlocking: true, error: '' });
     setTransferStatus(null);
     try {
       const secret = secretInputRef.current?.value.trim() ?? '';
       if (!secret) throw new Error('Enter a private key or mnemonic.');
-      const signer = secret.includes(' ')
-        ? await DirectSecp256k1HdWallet.fromMnemonic(secret, { prefix: 'zig' })
-        : await DirectSecp256k1Wallet.fromKey(hexToBytes(secret), 'zig');
-      const [account] = await signer.getAccounts();
-      if (!account) throw new Error('No wallet account could be derived.');
-      const expectedAddress = walletSessionsRef.current[index].manualAddress.trim();
-      if (expectedAddress && expectedAddress !== account.address) throw new Error(`The secret belongs to ${account.address}, not the entered address.`);
-      await loadBalance(index, account.address, generation);
-      if (generation !== sessionGenerationRef.current[index]) return;
-      signersRef.current[index] = signer;
-      patchWalletSession(index, { source: 'private', address: account.address, manualAddress: account.address, hasSigner: true });
-      void loadHistory(index, account.address, generation);
+      const currentVault = vaultsRef.current[index];
+      if (!currentVault) throw new Error('Vault not selected.');
+
+      if (currentVault.chainType === 'erc') {
+        const provider = new ethers.JsonRpcProvider(evmConfigRef.current.rpcUrl);
+        let wallet: ethers.Wallet;
+        if (secret.includes(' ')) {
+          const hd = ethers.HDNodeWallet.fromPhrase(secret);
+          wallet = new ethers.Wallet(hd.privateKey, provider);
+        } else {
+          const cleanHex = secret.startsWith('0x') ? secret : `0x${secret}`;
+          if (!/^0x[0-9a-fA-F]{64}$/.test(cleanHex)) {
+            throw new Error('Use a 32-byte (64 hex characters) private key or 12/24-word mnemonic.');
+          }
+          wallet = new ethers.Wallet(cleanHex, provider);
+        }
+        const derivedAddress = wallet.address;
+        const expectedAddress = walletSessionsRef.current[index]?.manualAddress.trim();
+        if (expectedAddress && expectedAddress.toLowerCase() !== derivedAddress.toLowerCase()) {
+          throw new Error(`The key belongs to ${derivedAddress}, not the entered address.`);
+        }
+        signersRef.current[index] = { type: 'evm', wallet, provider };
+        patchWalletSession(index, { source: 'private', address: derivedAddress, manualAddress: derivedAddress, hasSigner: true });
+        await loadBalance(index, derivedAddress, generation);
+      } else {
+        const signer = secret.includes(' ')
+          ? await DirectSecp256k1HdWallet.fromMnemonic(secret, { prefix: 'zig' })
+          : await DirectSecp256k1Wallet.fromKey(hexToBytes(secret), 'zig');
+        const [account] = await signer.getAccounts();
+        if (!account) throw new Error('No wallet account could be derived.');
+        const expectedAddress = walletSessionsRef.current[index]?.manualAddress.trim();
+        if (expectedAddress && expectedAddress !== account.address) {
+          throw new Error(`The key belongs to ${account.address}, not the entered address.`);
+        }
+        signersRef.current[index] = { type: 'cosmos', signer };
+        patchWalletSession(index, { source: 'private', address: account.address, manualAddress: account.address, hasSigner: true });
+        await loadBalance(index, account.address, generation);
+        void loadHistory(index, account.address, generation);
+      }
+
       if (secretInputRef.current) secretInputRef.current.value = '';
     } catch (error) {
       signersRef.current[index] = null;
@@ -375,14 +505,14 @@ export default function Home() {
   }
 
   function stopAll() {
-    defaultVaults.forEach((_, index) => clearVaultTimer(index));
+    vaults.forEach((_, index) => clearVaultTimer(index));
     const next = automationsRef.current.map((item) => ({ ...item, status: 'stopped' as const, nextAt: null }));
     automationsRef.current = next;
     setAutomations(next);
   }
 
   function pauseAll() {
-    defaultVaults.forEach((_, index) => clearVaultTimer(index));
+    vaults.forEach((_, index) => clearVaultTimer(index));
     const next = automationsRef.current.map((item) => item.status === 'running' ? { ...item, status: 'paused' as const, nextAt: null } : item);
     automationsRef.current = next;
     setAutomations(next);
@@ -390,7 +520,7 @@ export default function Home() {
 
   function clearWalletSession(index: number) {
     stopAutomation(index);
-    sessionGenerationRef.current[index] += 1;
+    sessionGenerationRef.current[index] = (sessionGenerationRef.current[index] ?? 0) + 1;
     signersRef.current[index] = null;
     patchWalletSession(index, { source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false });
     setHistory((current) => current.filter((entry) => entry.vaultIndex !== index));
@@ -400,21 +530,7 @@ export default function Home() {
   }
 
   async function disconnectWallet(index: number) {
-    const disconnectedSource = walletSessionsRef.current[index].source;
     clearWalletSession(index);
-    if (disconnectedSource === 'browser') {
-      // Keplr's enable/disable is global to the extension, not per-tab — only revoke it
-      // once no other vault tab is still relying on a browser-wallet session.
-      const stillUsingBrowser = walletSessionsRef.current.some((session, i) => i !== index && session.source === 'browser');
-      if (!stillUsingBrowser) {
-        try {
-          const keplr = (window as typeof window & { keplr?: KeplrProvider }).keplr;
-          await keplr?.disable?.(chainConfigRef.current.id);
-        } catch {
-          // The local app session is cleared even when the extension does not expose permission revocation.
-        }
-      }
-    }
   }
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
@@ -440,9 +556,9 @@ export default function Home() {
   }
 
   async function handleLogout() {
-    await Promise.all(defaultVaults.map((_, index) => disconnectWallet(index)));
-    try { await apiRequest('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch { /* Local state is still cleared. */ }
-    const resetAutomations = initialAutomations();
+    await Promise.all(vaults.map((_, index) => disconnectWallet(index)));
+    try { await apiRequest('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch {}
+    const resetAutomations = createInitialAutomations(defaultVaults.length);
     automationsRef.current = resetAutomations;
     setAutomations(resetAutomations);
     setAuthUser(null);
@@ -458,17 +574,27 @@ export default function Home() {
     setIbcTransfer(defaultIbcTransferConfig);
     setAdminOpen(false);
     setCompanyUsers([]);
+    setAddVaultOpen(false);
+    setSidebarOpen(false);
+    setSidebarFilter('all');
+    setHistory([]);
+    setSelectedVault(0);
     setLoginEmail('');
     setLoginPassword('');
   }
 
   async function openUserManagement() {
-    setAdminOpen(true);
     setAdminMessage('');
-    const response = await apiRequest('/api/admin/users');
-    if (!response.ok) return setAdminMessage('User list could not be loaded.');
-    const data = await response.json() as { users: AuthUser[] };
-    setCompanyUsers(data.users);
+    try {
+      const response = await apiRequest('/api/admin/users');
+      if (!response.ok) throw new Error('Could not load company user directory.');
+      const data = await response.json() as { users: AuthUser[] };
+      setCompanyUsers(data.users);
+      setAdminOpen(true);
+    } catch (error) {
+      setAdminMessage(error instanceof Error ? error.message : 'Could not load users.');
+      setAdminOpen(true);
+    }
   }
 
   async function handleCreateUser(event: FormEvent<HTMLFormElement>) {
@@ -482,31 +608,28 @@ export default function Home() {
         body: JSON.stringify({ email: newUserEmail, password: newUserPassword }),
       });
       const data = await response.json() as { user?: AuthUser; message?: string; code?: string };
-      if (!response.ok || !data.user) throw new Error(data.message ?? (data.code === 'EMAIL_ALREADY_EXISTS' ? 'That email already has an account.' : 'Account could not be created.'));
-      setCompanyUsers((current) => [...current, data.user!]);
+      if (!response.ok) throw new Error(data.message || 'User creation failed.');
+      if (data.user) setCompanyUsers((current) => [...current, data.user!]);
       setNewUserEmail('');
       setNewUserPassword('');
-      setAdminMessage('Account created successfully.');
+      setAdminMessage('Team account created successfully.');
     } catch (error) {
-      setAdminMessage(error instanceof Error ? error.message : 'Account could not be created.');
+      setAdminMessage(error instanceof Error ? error.message : 'User creation failed.');
     } finally {
       setCreatingUser(false);
     }
   }
 
   async function copyTransactionHash(hash: string) {
-    try {
-      await navigator.clipboard.writeText(hash);
-      setCopiedHash(hash);
-      window.setTimeout(() => setCopiedHash((current) => current === hash ? '' : current), 1600);
-    } catch {
-      setTransferStatus({ kind: 'error', message: 'Transaction hash could not be copied.' });
-    }
+    await navigator.clipboard.writeText(hash);
+    setCopiedHash(hash);
+    window.setTimeout(() => setCopiedHash((current) => current === hash ? '' : current), 1800);
   }
 
   function getAmountRange(index: number) {
-    const settings = automationsRef.current[index];
-    const decimals = transferTokenRef.current.decimals;
+    const currentVault = vaults[index];
+    const decimals = currentVault?.tokenDecimals ?? (currentVault?.chainType === 'erc' ? 18 : transferToken.decimals);
+    const settings = automations[index];
     const minimum = parseTokenAmount(settings.minimum, decimals);
     const maximum = settings.mode === 'once' ? minimum : settings.maximum.trim() ? parseTokenAmount(settings.maximum, decimals) : minimum;
     if (maximum < minimum) throw new Error('Maximum amount must be greater than or equal to the minimum.');
@@ -517,7 +640,8 @@ export default function Home() {
   function canSend(index: number) {
     const target = vaults[index];
     const session = walletSessions[index];
-    return Boolean(session?.hasSigner && target?.address && target.address !== 'Not configured' && hasValidRange(automations[index], transferToken.decimals));
+    const decimals = target?.tokenDecimals ?? (target?.chainType === 'erc' ? 18 : transferToken.decimals);
+    return Boolean(session?.hasSigner && target?.address && target.address !== 'Not configured' && hasValidRange(automations[index], decimals));
   }
 
   function canAutomate(index: number) {
@@ -570,85 +694,135 @@ export default function Home() {
   }
 
   async function executeTransfer(index: number, amount: bigint, source: 'Manual' | 'Automation'): Promise<boolean> {
-    const generation = sessionGenerationRef.current[index];
-    const signer = signersRef.current[index];
+    const generation = sessionGenerationRef.current[index] ?? 0;
+    const universalSigner = signersRef.current[index];
     const target = vaultsRef.current[index];
-    if (!signer || !target?.address || target.address === 'Not configured') {
-      setTransferStatus({ kind: 'error', message: 'Unlock the signer and configure the vault address first.' });
+    if (!universalSigner || !target?.address || target.address === 'Not configured') {
+      setTransferStatus({ kind: 'error', message: 'Unlock the private key signer and configure the vault address first.' });
       return false;
     }
+
     const startedAt = unixNow();
     const id = `${startedAt}-${index}-${crypto.randomUUID()}`;
     const entry: HistoryEntry = { id, vaultIndex: index, time: startedAt, amountBaseUnits: amount, status: 'Pending', source };
     setHistory((current) => [entry, ...current].slice(0, 100));
     setSendingVaults((current) => [...new Set([...current, index])]);
-    let client: SigningStargateClient | null = null;
+
     try {
-      const [account] = await signer.getAccounts();
-      if (!account) throw new Error('Signer account is unavailable.');
-      if (generation !== sessionGenerationRef.current[index]) return false;
-      client = await SigningStargateClient.connectWithSigner(chainConfigRef.current.rpcUrl, signer, { gasPrice: GasPrice.fromString(`0.025${nativeTokenRef.current.denom}`) });
-      if (generation !== sessionGenerationRef.current[index]) return false;
-      const result = await client.signAndBroadcast(account.address, [buildIbcTransferMessage(account.address, target.address, amount)], GAS_MULTIPLIER);
-      if (result.code !== 0) throw new Error(result.rawLog || `Transaction failed with code ${result.code}.`);
-      if (generation !== sessionGenerationRef.current[index]) return true;
-      setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Success', hash: result.transactionHash } : item));
-      setTransferStatus({ kind: 'success', message: `${formatBaseUnits(amount, transferTokenRef.current.decimals)} ${transferTokenRef.current.symbol} transferred to ${target.name}.`, hash: result.transactionHash });
-      try { await loadBalance(index, account.address, generation); } catch { /* The confirmed transfer remains successful if balance refresh is temporarily unavailable. */ }
-      return true;
+      if (target.chainType === 'erc') {
+        if (universalSigner.type !== 'evm') throw new Error('Signer is not an EVM wallet.');
+        const tx = await universalSigner.wallet.sendTransaction({
+          to: target.address,
+          value: amount,
+        });
+        const receipt = await tx.wait(1);
+        if (!receipt || receipt.status === 0) throw new Error('EVM transaction was reverted by the network.');
+        if (generation !== (sessionGenerationRef.current[index] ?? 0)) return true;
+
+        setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Success', hash: tx.hash } : item));
+        setTransferStatus({
+          kind: 'success',
+          message: `${formatBaseUnits(amount, target.tokenDecimals ?? 18)} ${target.tokenSymbol ?? 'ETH'} transferred to ${target.name}.`,
+          hash: tx.hash,
+        });
+        try { await loadBalance(index, universalSigner.wallet.address, generation); } catch {}
+        return true;
+      } else {
+        if (universalSigner.type !== 'cosmos') throw new Error('Signer is not a Cosmos signer.');
+        const signer = universalSigner.signer;
+        const [account] = await signer.getAccounts();
+        if (!account) throw new Error('Signer account is unavailable.');
+        if (generation !== (sessionGenerationRef.current[index] ?? 0)) return false;
+
+        const client = await SigningStargateClient.connectWithSigner(
+          chainConfigRef.current.rpcUrl,
+          signer,
+          { gasPrice: GasPrice.fromString(`0.025${nativeTokenRef.current.denom}`) }
+        );
+
+        let txHash = '';
+        // If target is a native ZIGChain address (starts with zig1), use standard Bank Send for 100% testnet reliability
+        if (target.address.startsWith('zig1')) {
+          const sendResult = await client.sendTokens(
+            account.address,
+            target.address,
+            [coin(amount.toString(), transferTokenRef.current.denom)],
+            GAS_MULTIPLIER
+          );
+          if (sendResult.code !== 0) throw new Error(sendResult.rawLog || `Transaction failed with code ${sendResult.code}.`);
+          txHash = sendResult.transactionHash;
+        } else {
+          const ibcResult = await client.signAndBroadcast(
+            account.address,
+            [buildIbcTransferMessage(account.address, target.address, amount)],
+            GAS_MULTIPLIER
+          );
+          if (ibcResult.code !== 0) throw new Error(ibcResult.rawLog || `Transaction failed with code ${ibcResult.code}.`);
+          txHash = ibcResult.transactionHash;
+        }
+
+        if (generation !== (sessionGenerationRef.current[index] ?? 0)) return true;
+        setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Success', hash: txHash } : item));
+        setTransferStatus({
+          kind: 'success',
+          message: `${formatBaseUnits(amount, transferTokenRef.current.decimals)} ${transferTokenRef.current.symbol} transferred to ${target.name}.`,
+          hash: txHash,
+        });
+        try { await loadBalance(index, account.address, generation); } catch {}
+        return true;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Transfer failed.';
-      if (generation === sessionGenerationRef.current[index]) {
+      if (generation === (sessionGenerationRef.current[index] ?? 0)) {
         setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Failed', error: message } : item));
         setTransferStatus({ kind: 'error', message });
       }
       return false;
     } finally {
-      client?.disconnect();
-      if (generation === sessionGenerationRef.current[index]) setSendingVaults((current) => current.filter((item) => item !== index));
+      setSendingVaults((current) => current.filter((item) => item !== index));
     }
   }
 
   function enqueueTransfer(index: number, amount: bigint, source: 'Manual' | 'Automation') {
-    const run = () => source === 'Automation' && automationsRef.current[index].status !== 'running' ? Promise.resolve(false) : executeTransfer(index, amount, source);
-    const task = transferQueueRef.current[index].then(run, run);
-    transferQueueRef.current[index] = task;
-    return task;
+    const queue = transferQueueRef.current[index] ?? Promise.resolve(true);
+    const nextExecution = queue.then(() => executeTransfer(index, amount, source), () => executeTransfer(index, amount, source));
+    transferQueueRef.current[index] = nextExecution;
+    return nextExecution;
+  }
+
+  function scheduleNextCycle(index: number) {
+    clearVaultTimer(index);
+    const target = automationsRef.current[index];
+    if (target.status !== 'running' || target.mode !== 'automation') return;
+    const intervalMs = target.interval * 1000;
+    const nextAt = unixNow() + intervalMs;
+    patchAutomation(index, { nextAt });
+    timersRef.current[index] = setTimeout(() => void runAutomationCycle(index), intervalMs);
   }
 
   async function runAutomationCycle(index: number) {
-    if (automationsRef.current[index].status !== 'running') return;
-    let amount: bigint;
+    if (automationsRef.current[index]?.status !== 'running') return;
     try {
-      const range = getAmountRange(index);
-      amount = randomAmount(range.minimum, range.maximum);
+      const { minimum, maximum } = getAmountRange(index);
+      const amount = randomAmount(minimum, maximum);
+      const success = await enqueueTransfer(index, amount, 'Automation');
+      if (!success) {
+        pauseAutomation(index);
+        return;
+      }
+      patchAutomation(index, { lastAt: unixNow() });
+      scheduleNextCycle(index);
     } catch (error) {
       pauseAutomation(index);
-      setTransferStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Invalid automation settings.' });
-      return;
+      setTransferStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Automation cycle failed.' });
     }
-    const success = await enqueueTransfer(index, amount, 'Automation');
-    if (automationsRef.current[index].status !== 'running') return;
-    if (!success) {
-      pauseAutomation(index);
-      setTransferStatus((current) => ({ kind: 'error', message: `${current?.message ?? 'Transfer failed.'} Automation paused to prevent repeated failures.` }));
-      return;
-    }
-    const completedAt = unixNow();
-    const nextAt = completedAt + automationsRef.current[index].interval * 1000;
-    patchAutomation(index, { lastAt: completedAt, nextAt });
-    clearVaultTimer(index);
-    timersRef.current[index] = setTimeout(() => void runAutomationCycle(index), Math.max(0, nextAt - unixNow()));
   }
 
   function startAutomation(index: number) {
     try {
-      if (automationsRef.current[index].mode !== 'automation') throw new Error('Select Automation mode first.');
+      if (automationsRef.current[index]?.mode !== 'automation') throw new Error('Select Automation mode first.');
       getAmountRange(index);
       if (!signersRef.current[index]) throw new Error('Unlock the private-key session first.');
-      if (walletSessionsRef.current[index].source !== 'private') {
-        throw new Error('Automation requires the Private Key session. Keplr requires approval for every transaction.');
-      }
       const target = vaultsRef.current[index];
       if (!target?.address || target.address === 'Not configured') throw new Error('This vault address is not configured.');
       clearVaultTimer(index);
@@ -689,15 +863,94 @@ export default function Home() {
     updateSelectedAutomation({ customInterval: value, ...(Number.isInteger(seconds) && seconds >= 5 ? { interval: seconds } : {}) });
   }
 
+  async function handleAddVault(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAddVaultError('');
+    const name = newVaultName.trim();
+    const address = newVaultAddress.trim();
+    if (!name) return setAddVaultError('Vault name is required.');
+    if (!address) return setAddVaultError('Vault address is required.');
+
+    if (newVaultChain === 'zigchain') {
+      if (!/^zig1[0-9a-z]{38,62}$/.test(address)) {
+        return setAddVaultError('Enter a valid ZIGChain Bech32 address (starts with zig1...).');
+      }
+    } else {
+      if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+        return setAddVaultError('Enter a valid ERC / EVM hexadecimal address (0x followed by 40 hex characters).');
+      }
+    }
+
+    setSavingVault(true);
+    try {
+      const symbol = newVaultSymbol.trim() || (newVaultChain === 'erc' ? 'ETH' : 'ZIG');
+      const decimals = newVaultDecimals.trim() ? Number(newVaultDecimals) : (newVaultChain === 'erc' ? 18 : 6);
+      const summary = newVaultSummary.trim() || `${newVaultChain === 'erc' ? 'ERC / EVM' : 'ZIGChain'} custom automated vault strategy`;
+
+      const newIndex = vaults.length;
+      const newPair = newVaultChain === 'erc' ? `ERC ${newIndex - 2}` : `PAIR ${newIndex + 1}`;
+      const newVault: Vault = {
+        id: `custom-${unixNow()}`,
+        pair: newPair,
+        name,
+        address,
+        chainType: newVaultChain,
+        accent: newVaultChain === 'erc' ? 'cyan' : 'blue',
+        tvl: '$0',
+        apy: '—',
+        type: 'Custom Vault',
+        risk: 'Medium',
+        summary,
+        tokenSymbol: symbol,
+        tokenDecimals: decimals,
+      };
+
+      // Save to API (best effort)
+      try {
+        await apiRequest('/api/vaults/custom', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, address, chainType: newVaultChain, tokenSymbol: symbol, tokenDecimals: decimals, summary }),
+        });
+      } catch {}
+
+      const updatedVaults = [...vaults, newVault];
+      vaultsRef.current = updatedVaults;
+      setVaults(updatedVaults);
+
+      setAutomations((cur) => [...cur, { mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null }]);
+      setWalletSessions((cur) => [...cur, { mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false }]);
+
+      // Persist to localStorage
+      try {
+        const stored = JSON.parse(localStorage.getItem('vaultflow_custom_vaults') || '[]') as Vault[];
+        stored.push(newVault);
+        localStorage.setItem('vaultflow_custom_vaults', JSON.stringify(stored));
+      } catch {}
+
+      setSelectedVault(newIndex);
+      setAddVaultOpen(false);
+      setNewVaultName('');
+      setNewVaultAddress('');
+      setNewVaultSummary('');
+      setNewVaultSymbol('');
+      setNewVaultDecimals('');
+    } catch (err) {
+      setAddVaultError(err instanceof Error ? err.message : 'Failed to create vault.');
+    } finally {
+      setSavingVault(false);
+    }
+  }
+
   const statusLabel = automation.status.toUpperCase();
   const automatedVaultIndexes = automations.map((item, index) => item.mode === 'automation' ? index : -1).filter((index) => index >= 0);
   const allReady = automatedVaultIndexes.length > 0 && automatedVaultIndexes.every((index) => canAutomate(index));
-  const actionHint = !walletSession.source ? 'Connect a wallet to enable transfers.'
-    : !walletSession.hasSigner ? 'The connected wallet does not expose a transaction signer.'
-    : automation.mode === 'automation' && walletSession.source === 'browser' ? 'Keplr asks for approval on every transaction. Use the Private Key tab once to unlock automatic signing for this browser session.'
+
+  const actionHint = !walletSession.source ? 'Enter private key or mnemonic to unlock session.'
+    : !walletSession.hasSigner ? 'The signer is not unlocked for this vault.'
     : !vault.address || vault.address === 'Not configured' ? 'Configure this vault address first.'
     : !automation.minimum.trim() ? 'Enter an amount to enable the transfer button.'
-    : !hasValidRange(automation, transferToken.decimals) ? automation.mode === 'automation' ? 'Check the amount range and use a frequency of at least 5 seconds.' : `Enter a valid ${transferToken.symbol} amount.`
+    : !hasValidRange(automation, currentTokenDecimals) ? automation.mode === 'automation' ? 'Check the amount range and use a frequency of at least 5 seconds.' : `Enter a valid ${currentTokenSymbol} amount.`
     : '';
 
   if (authLoading) return <main className="auth-shell"><div className="auth-loading"><span className="brand-glyph">V</span><p>Loading Vaultflow…</p></div></main>;
@@ -720,73 +973,660 @@ export default function Home() {
 
   return (
     <main className="console-shell">
+      {/* Slide Sidebar for All Vaults */}
+      <div
+        className={`sidebar-overlay ${sidebarOpen ? 'open' : ''}`}
+        onClick={() => setSidebarOpen(false)}
+        aria-hidden={!sidebarOpen}
+      />
+      <aside
+        className={`vault-sidebar ${sidebarOpen ? 'open' : ''}`}
+        aria-label="Vault Strategies Directory"
+        aria-hidden={!sidebarOpen}
+      >
+        <div className="sidebar-header">
+          <div className="sidebar-header-title">
+            <span className="brand-glyph-sm">V</span>
+            <div>
+              <h3>Vault Strategies</h3>
+              <small>{vaults.length} vaults configured</small>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="sidebar-close-btn"
+            onClick={() => setSidebarOpen(false)}
+            aria-label="Close vaults menu"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+
+        <div className="sidebar-filter-tabs">
+          <button
+            type="button"
+            className={sidebarFilter === 'all' ? 'active' : ''}
+            onClick={() => setSidebarFilter('all')}
+          >
+            All ({vaults.length})
+          </button>
+          <button
+            type="button"
+            className={sidebarFilter === 'zigchain' ? 'active' : ''}
+            onClick={() => setSidebarFilter('zigchain')}
+          >
+            ZIGChain ({vaults.filter((v) => v.chainType === 'zigchain').length})
+          </button>
+          <button
+            type="button"
+            className={sidebarFilter === 'erc' ? 'active' : ''}
+            onClick={() => setSidebarFilter('erc')}
+          >
+            ERC ({vaults.filter((v) => v.chainType === 'erc').length})
+          </button>
+        </div>
+
+        <div className="sidebar-vaults-list">
+          {vaults
+            .map((item, index) => ({ item, index }))
+            .filter(({ item }) => sidebarFilter === 'all' || item.chainType === sidebarFilter)
+            .map(({ item, index }) => (
+              <button
+                key={item.id || item.pair}
+                type="button"
+                className={`sidebar-vault-item ${selectedVault === index ? 'active' : ''}`}
+                onClick={() => {
+                  setSelectedVault(index);
+                  setSidebarOpen(false);
+                }}
+              >
+                <div className="sidebar-vault-top">
+                  <span className={`chain-pill ${item.chainType}`}>
+                    {item.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'}
+                  </span>
+                  <span className="sidebar-vault-pair">{item.pair}</span>
+                  {walletSessions[index]?.source && (
+                    <span className="sidebar-vault-connected" title="Signer unlocked">● UNLOCKED</span>
+                  )}
+                  <span className={`pair-dot ${item.accent}`} />
+                </div>
+                <div className="sidebar-vault-name">{item.name}</div>
+                <div className="sidebar-vault-meta">
+                  <span className="sidebar-vault-stat"><strong>{item.apy}</strong> APY</span>
+                  <span className="sidebar-vault-stat"><strong>{item.tvl}</strong> TVL</span>
+                  <span className="sidebar-vault-risk">{item.risk} Risk</span>
+                </div>
+                {item.address && item.address !== 'Not configured' && (
+                  <div className="sidebar-vault-address">
+                    <code>{item.address.slice(0, 10)}...{item.address.slice(-6)}</code>
+                  </div>
+                )}
+              </button>
+            ))}
+        </div>
+
+        <div className="sidebar-footer">
+          <button
+            type="button"
+            className="sidebar-add-vault-btn"
+            onClick={() => {
+              setSidebarOpen(false);
+              setAddVaultOpen(true);
+            }}
+          >
+            + ADD ANOTHER VAULT
+          </button>
+        </div>
+      </aside>
+
       <nav className="vault-nav" aria-label="Vault selection">
-        <div className="nav-brand"><span className="brand-glyph">V</span><span>Vaultflow</span></div>
-        <div className="pair-tabs" role="tablist">{vaults.map((item, index) => <button key={item.pair} className={`pair-tab ${selectedVault === index ? 'active' : ''}`} type="button" role="tab" aria-selected={selectedVault === index} onClick={() => setSelectedVault(index)}><span>{item.name}</span>{walletSessions[index].source && <span className="connected-mini" title="Wallet connected">●</span>}<span className={`pair-dot ${item.accent}`} /></button>)}</div>
-        <div className="account-tools"><span className="account-identity"><b>{authUser.email.slice(0, 2).toUpperCase()}</b><span><strong>{authUser.email}</strong><small>{authUser.role}</small></span></span>{authUser.role === 'ADMIN' && <button type="button" onClick={() => void openUserManagement()}>USERS</button>}<button className="logout-button" type="button" onClick={() => void handleLogout()}>LOGOUT</button></div>
+        <div className="nav-brand-section">
+          <button
+            type="button"
+            className="sidebar-trigger-btn"
+            onClick={() => setSidebarOpen(true)}
+            title="Browse all vaults"
+            aria-label="Toggle vaults menu"
+          >
+            <svg className="trigger-hamburger" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" x2="21" y1="6" y2="6"/><line x1="3" x2="21" y1="12" y2="12"/><line x1="3" x2="21" y1="18" y2="18"/></svg>
+            <span className="trigger-label">VAULTS</span>
+            <span className="trigger-badge">{vaults.length}</span>
+          </button>
+          <div className="nav-brand"><span className="brand-glyph">V</span><span>Vaultflow</span></div>
+        </div>
+
+        {/* Current Active Vault Switcher Pill */}
+        <button
+          type="button"
+          className="active-vault-pill"
+          onClick={() => setSidebarOpen(true)}
+          title="Click to browse all vaults"
+        >
+          <span className={`chain-pill ${vault.chainType}`}>{vault.chainType === 'erc' ? 'ERC' : 'ZIG'}</span>
+          <span className="active-vault-name">{vault.name}</span>
+          {walletSession.source && <span className="connected-mini" title="Signer unlocked">●</span>}
+          <span className={`pair-dot ${vault.accent}`} />
+          <svg className="active-vault-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+
+        <div className="nav-actions">
+          <button className="nav-add-vault-btn" type="button" onClick={() => setAddVaultOpen(true)} title="Add a new vault strategy">
+            + ADD VAULT
+          </button>
+          <div className="account-tools">
+            <span className="account-identity">
+              <b>{authUser.email.slice(0, 2).toUpperCase()}</b>
+              <span><strong>{authUser.email}</strong><small>{authUser.role}</small></span>
+            </span>
+            {authUser.role === 'ADMIN' && <button type="button" onClick={() => void openUserManagement()}>USERS</button>}
+            <button className="logout-button" type="button" onClick={() => void handleLogout()}>LOGOUT</button>
+          </div>
+        </div>
       </nav>
 
-      {adminOpen && authUser.role === 'ADMIN' && <div className="admin-overlay" role="dialog" aria-modal="true" aria-label="Company user management"><section className="admin-panel"><header><div><span>ADMINISTRATION</span><h2>Company accounts</h2><p>Create login access for another team member.</p></div><button type="button" onClick={() => setAdminOpen(false)} aria-label="Close user management">×</button></header><form onSubmit={handleCreateUser}><label><span>EMAIL</span><input type="email" value={newUserEmail} onChange={(event) => setNewUserEmail(event.target.value)} placeholder="teammate@company.com" required /></label><label><span>TEMPORARY PASSWORD</span><input type="password" minLength={8} value={newUserPassword} onChange={(event) => setNewUserPassword(event.target.value)} placeholder="At least 8 characters" required /></label><button type="submit" disabled={creatingUser}>{creatingUser ? 'CREATING…' : 'CREATE ACCOUNT'}</button></form>{adminMessage && <p className="admin-message" role="status">{adminMessage}</p>}<div className="user-list"><div className="user-list-head"><span>ACCOUNT</span><span>ROLE</span><span>STATUS</span></div>{companyUsers.map((user) => <div className="user-list-row" key={user.id}><span><strong>{user.email}</strong><small>Created {new Date(user.createdAt).toLocaleDateString()}</small></span><b>{user.role}</b><i>{user.active ? 'ACTIVE' : 'DISABLED'}</i></div>)}</div></section></div>}
+      {/* Add Vault Dialog Modal */}
+      {addVaultOpen && (
+        <div className="admin-overlay" role="dialog" aria-modal="true" aria-label="Add new vault">
+          <section className="add-vault-panel">
+            <header className="add-vault-header">
+              <div>
+                <span>STRATEGY MANAGEMENT</span>
+                <h2>Add Another Vault</h2>
+                <p>Configure a new ZIGChain or ERC (EVM) automated vault strategy.</p>
+              </div>
+              <button type="button" className="modal-close-btn" onClick={() => setAddVaultOpen(false)} aria-label="Close add vault">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+              </button>
+            </header>
+            <form onSubmit={handleAddVault} className="add-vault-form">
+              <div className="chain-selector-box">
+                <span className="form-label">CHOOSE VAULT TYPE / NETWORK</span>
+                <div className="chain-toggle-group">
+                  <button
+                    type="button"
+                    className={`chain-select-btn ${newVaultChain === 'zigchain' ? 'active' : ''}`}
+                    onClick={() => setNewVaultChain('zigchain')}
+                  >
+                    <strong>◈ ZIGChain (Cosmos)</strong>
+                    <small>Native Cosmos SDK · zig1… addresses</small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`chain-select-btn ${newVaultChain === 'erc' ? 'active' : ''}`}
+                    onClick={() => setNewVaultChain('erc')}
+                  >
+                    <strong>⟠ ERC / EVM</strong>
+                    <small>EVM smart contracts · 0x… addresses</small>
+                  </button>
+                </div>
+              </div>
+
+              <div className="form-row">
+                <label>
+                  <span>VAULT NAME</span>
+                  <input
+                    type="text"
+                    value={newVaultName}
+                    onChange={(e) => setNewVaultName(e.target.value)}
+                    placeholder={newVaultChain === 'erc' ? 'e.g. Nawa Yield Pool' : 'e.g. High Yield Strategy'}
+                    required
+                  />
+                </label>
+                <label>
+                  <span>TARGET VAULT ADDRESS</span>
+                  <input
+                    type="text"
+                    value={newVaultAddress}
+                    onChange={(e) => setNewVaultAddress(e.target.value)}
+                    placeholder={newVaultChain === 'erc' ? '0x...' : 'zig1...'}
+                    required
+                    spellCheck={false}
+                  />
+                </label>
+              </div>
+
+              <div className="form-row three-col">
+                <label>
+                  <span>TOKEN SYMBOL</span>
+                  <input
+                    type="text"
+                    value={newVaultSymbol}
+                    onChange={(e) => setNewVaultSymbol(e.target.value)}
+                    placeholder={newVaultChain === 'erc' ? 'ETH' : 'ZIG'}
+                  />
+                </label>
+                <label>
+                  <span>DECIMALS</span>
+                  <input
+                    type="number"
+                    value={newVaultDecimals}
+                    onChange={(e) => setNewVaultDecimals(e.target.value)}
+                    placeholder={newVaultChain === 'erc' ? '18' : '6'}
+                  />
+                </label>
+                <label>
+                  <span>STRATEGY SUMMARY (OPTIONAL)</span>
+                  <input
+                    type="text"
+                    value={newVaultSummary}
+                    onChange={(e) => setNewVaultSummary(e.target.value)}
+                    placeholder="e.g. Automated liquidity provision"
+                  />
+                </label>
+              </div>
+
+              {addVaultError && <p className="form-error" role="alert">{addVaultError}</p>}
+
+              <button type="submit" className="create-vault-submit" disabled={savingVault}>
+                {savingVault ? 'CREATING VAULT…' : 'CREATE & OPEN VAULT'}
+              </button>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {adminOpen && authUser.role === 'ADMIN' && (
+        <div className="admin-overlay" role="dialog" aria-modal="true" aria-label="Company user management">
+          <section className="admin-panel">
+            <header>
+              <div>
+                <span>ADMINISTRATION</span>
+                <h2>Company accounts</h2>
+                <p>Create login access for another team member.</p>
+              </div>
+              <button type="button" onClick={() => setAdminOpen(false)} aria-label="Close user management">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+              </button>
+            </header>
+            <form onSubmit={handleCreateUser} className="admin-user-create-form">
+              <label>
+                <span>EMAIL</span>
+                <input type="email" value={newUserEmail} onChange={(event) => setNewUserEmail(event.target.value)} placeholder="teammate@company.com" required />
+              </label>
+              <label>
+                <span>TEMPORARY PASSWORD</span>
+                <input type="password" minLength={8} value={newUserPassword} onChange={(event) => setNewUserPassword(event.target.value)} placeholder="At least 8 characters" required />
+              </label>
+              <button type="submit" disabled={creatingUser}>{creatingUser ? 'CREATING…' : 'CREATE ACCOUNT'}</button>
+            </form>
+            {adminMessage && <p className="admin-message" role="status">{adminMessage}</p>}
+            <div className="user-list">
+              <div className="user-list-head"><span>ACCOUNT</span><span>ROLE</span><span>STATUS</span></div>
+              {companyUsers.map((user) => (
+                <div className="user-list-row" key={user.id}>
+                  <span><strong>{user.email}</strong><small>Created {new Date(user.createdAt).toLocaleDateString()}</small></span>
+                  <b>{user.role}</b>
+                  <i>{user.active ? 'ACTIVE' : 'DISABLED'}</i>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
 
       <div className="console-content">
         <header className="vault-hero">
-          <div className="hero-title"><p><span className={`pulse ${vault.accent}`} /> {vault.pair} — VAULT AUTOMATION CONSOLE</p><h1><span>{transferToken.symbol}</span><b>→</b>{vault.name}</h1></div>
-          <div className="hero-status"><span className="state-pill"><i /> TIMER READY</span><span className={`state-pill ${automation.status}`}>{statusLabel}</span><button type="button" onClick={() => void disconnectWallet(selectedVault)} disabled={!walletSession.source}>DISCONNECT</button></div>
+          <div className="hero-title">
+            <p>
+              <span className={`pulse ${vault.accent}`} /> {vault.pair} — {vault.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'} VAULT AUTOMATION
+            </p>
+            <h1><span>{currentTokenSymbol}</span><b>→</b>{vault.name}</h1>
+          </div>
+          <div className="hero-status">
+            <span className="state-pill"><i /> TIMER READY</span>
+            <span className={`state-pill ${automation.status}`}>{statusLabel}</span>
+            <button className="hero-add-vault-btn" type="button" onClick={() => setAddVaultOpen(true)}>+ ADD VAULT</button>
+            <button type="button" onClick={() => void disconnectWallet(selectedVault)} disabled={!walletSession.source}>CLEAR SESSION</button>
+          </div>
         </header>
 
         <section className="global-bar">
-          <div><span className="global-icon">◎</span><span><strong>Global automation</strong><small>{allReady ? `${automatedVaultIndexes.length} automation schedule${automatedVaultIndexes.length === 1 ? '' : 's'} ready` : 'Choose Automation on at least one vault and complete its settings'}</small></span></div>
-          <div className="global-buttons"><button type="button" onClick={startAll} disabled={!allReady}>START ALL</button><button type="button" onClick={pauseAll} disabled={!anyRunning}>PAUSE ALL</button><button className="stop" type="button" onClick={stopAll} disabled={!anyActive}>STOP ALL</button></div>
+          <div>
+            <span className="global-icon">◎</span>
+            <span>
+              <strong>Global automation</strong>
+              <small>{allReady ? `${automatedVaultIndexes.length} automation schedule${automatedVaultIndexes.length === 1 ? '' : 's'} ready` : 'Choose Automation on at least one vault and complete its settings'}</small>
+            </span>
+          </div>
+          <div className="global-buttons">
+            <button type="button" onClick={startAll} disabled={!allReady}>START ALL</button>
+            <button type="button" onClick={pauseAll} disabled={!anyRunning}>PAUSE ALL</button>
+            <button className="stop" type="button" onClick={stopAll} disabled={!anyActive}>STOP ALL</button>
+          </div>
         </section>
 
         <section className="two-column">
+          {/* Wallet Card - Private Key Only */}
           <article className="console-card wallet-card">
-            <div className="card-title"><span className="title-icon blue">▣</span><div><h2>Wallet Access</h2><p>Each vault tab keeps its own wallet connection.</p></div></div>
-            <div className="mode-switch" role="tablist" aria-label="Wallet mode"><button className={walletSession.mode === 'private' ? 'active' : ''} type="button" onClick={() => patchWalletSession(selectedVault, { mode: 'private' })}>PRIVATE KEY {walletSession.source === 'private' && <span className="connected-mini">CONNECTED</span>}</button><button className={walletSession.mode === 'wallet' ? 'active' : ''} type="button" onClick={() => patchWalletSession(selectedVault, { mode: 'wallet' })}>BROWSER WALLET {walletSession.source === 'browser' && <span className="connected-mini">CONNECTED</span>}</button></div>
+            <div className="card-title">
+              <span className="title-icon blue">▣</span>
+              <div>
+                <h2>Private Key Session</h2>
+                <p>Unlock an interactive signing session in memory for {vault.name}.</p>
+              </div>
+            </div>
+
             {walletSession.source ? (
               <div className="connection-panel">
-                <div className="connection-heading"><span className="connection-mark">✓</span><div><small>ACTIVE CONNECTION · {vault.pair}</small><h3>{walletSession.source === 'browser' ? 'Browser wallet connected' : 'Private-key session connected'}</h3></div><span className="connection-method">{walletSession.source === 'browser' ? 'KEPLR' : 'PRIVATE KEY'}</span></div>
-                <div className="connected-account"><span>WALLET ADDRESS</span><code>{walletSession.address}</code><span>BALANCE</span><strong>{formatBaseUnits(walletSession.balanceBaseUnits, transferToken.decimals)} {transferToken.symbol}</strong></div>
-                <p>This connection only applies to {vault.name}. Select another vault tab to connect a different wallet.</p>
-                <button className="disconnect-button" type="button" onClick={() => void disconnectWallet(selectedVault)}>DISCONNECT & CLEAR WALLET DATA</button>
+                <div className="connection-heading">
+                  <span className="connection-mark">✓</span>
+                  <div>
+                    <small>SESSION UNLOCKED · {vault.pair} ({vault.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'})</small>
+                    <h3>Signer active in memory</h3>
+                  </div>
+                  <span className="connection-method">PRIVATE KEY</span>
+                </div>
+                <div className="connected-account">
+                  <span>UNLOCKED ADDRESS</span>
+                  <code>{walletSession.address}</code>
+                  <span>AVAILABLE BALANCE</span>
+                  <strong>{formatBaseUnits(walletSession.balanceBaseUnits, currentTokenDecimals)} {currentTokenSymbol}</strong>
+                </div>
+                <p>Session signer resides in memory and never leaves this tab. Close or clear this session when finished.</p>
+                <button className="disconnect-button" type="button" onClick={() => void disconnectWallet(selectedVault)}>
+                  CLEAR SESSION & SECRETS
+                </button>
               </div>
-            ) : walletSession.mode === 'wallet' ? (
-              <div className="wallet-connect"><span className="wallet-orbit"><i /><b>◈</b></span><h3>Connect a browser wallet</h3><p>Connect Keplr to load the wallet address, balance, and confirmed vault transactions for {vault.name}.</p><button type="button" onClick={() => void connectKeplr(selectedVault)} disabled={walletSession.connecting}>{walletSession.connecting ? 'CONNECTING…' : 'CONNECT KEPLR'} <span>→</span></button><small>{walletSession.error || `${chainConfig.name} · chain ID ${chainConfig.id}`}</small></div>
             ) : (
-              <div className="private-form"><label><span>WALLET ADDRESS (OPTIONAL VERIFICATION)</span><input value={walletSession.manualAddress} onChange={(event) => patchWalletSession(selectedVault, { manualAddress: event.target.value })} placeholder="zig1…" autoComplete="off" spellCheck={false} /></label><label><span>PRIVATE KEY / MNEMONIC</span><input ref={secretInputRef} type="password" placeholder="32-byte hex key or 12/24-word mnemonic" autoComplete="new-password" spellCheck={false} /></label><div className="warning-note"><b>!</b><p><strong>Browser-session automation only.</strong> The signer stays in memory and all loops stop when you disconnect, refresh, close, or suspend this tab.</p></div><button className="unlock-button" type="button" onClick={() => void unlockManualSession(selectedVault)} disabled={walletSession.unlocking}>{walletSession.unlocking ? 'UNLOCKING…' : 'UNLOCK SESSION'}</button>{walletSession.error && <p className="form-error" role="alert">{walletSession.error}</p>}</div>
+              <div className="private-form">
+                <div className="chain-info-banner">
+                  <span>NETWORK:</span>
+                  <strong>{vault.chainType === 'erc' ? 'EVM / ERC-Compatible' : `${chainConfig.name} (${chainConfig.id})`}</strong>
+                </div>
+                <label>
+                  <span>WALLET ADDRESS (OPTIONAL VERIFICATION)</span>
+                  <input
+                    value={walletSession.manualAddress}
+                    onChange={(event) => patchWalletSession(selectedVault, { manualAddress: event.target.value })}
+                    placeholder={vault.chainType === 'erc' ? '0x...' : 'zig1...'}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+                <label>
+                  <span>PRIVATE KEY OR MNEMONIC</span>
+                  <input
+                    ref={secretInputRef}
+                    type="password"
+                    placeholder="32-byte hex key or 12/24-word phrase"
+                    autoComplete="new-password"
+                    spellCheck={false}
+                  />
+                </label>
+                <div className="warning-note">
+                  <b>!</b>
+                  <p>
+                    <strong>In-memory private key signing only.</strong> Secrets are kept strictly in active browser memory and deleted immediately upon refresh, close, or manual disconnect.
+                  </p>
+                </div>
+                <button className="unlock-button" type="button" onClick={() => void unlockManualSession(selectedVault)} disabled={walletSession.unlocking}>
+                  {walletSession.unlocking ? 'DERIVING SIGNER…' : 'UNLOCK SESSION'}
+                </button>
+                {walletSession.error && <p className="form-error" role="alert">{walletSession.error}</p>}
+              </div>
             )}
           </article>
 
+          {/* Vault Card */}
           <article className="console-card vault-card">
-            <div className="card-title"><span className={`title-icon ${vault.accent}`}>◇</span><div><h2>Vault Details</h2><p>Server-controlled destination configuration.</p></div></div>
-            <div className="vault-nameplate"><span className={`vault-badge ${vault.accent}`}>{vault.pair.replace('PAIR ', '0')}</span><div><small>SELECTED VAULT</small><strong>{vault.name}</strong></div><span className={vault.address && vault.address !== 'Not configured' ? 'configured' : 'not-configured'}>{vault.address && vault.address !== 'Not configured' ? 'READY' : 'NOT CONFIGURED'}</span></div>
+            <div className="card-title">
+              <span className={`title-icon ${vault.accent}`}>◇</span>
+              <div>
+                <h2>Vault Details</h2>
+                <p>Target destination configuration.</p>
+              </div>
+              <button className="card-add-vault-btn" type="button" onClick={() => setAddVaultOpen(true)}>
+                + ADD VAULT
+              </button>
+            </div>
+            <div className="vault-nameplate">
+              <span className={`vault-badge ${vault.accent}`}>{vault.pair}</span>
+              <div>
+                <small>{vault.chainType === 'erc' ? 'ERC / EVM STRATEGY' : 'ZIGCHAIN STRATEGY'}</small>
+                <strong>{vault.name}</strong>
+              </div>
+              <span className={vault.address && vault.address !== 'Not configured' ? 'configured' : 'not-configured'}>
+                {vault.address && vault.address !== 'Not configured' ? 'READY' : 'NOT CONFIGURED'}
+              </span>
+            </div>
             <p className="vault-summary">{vault.summary}</p>
-            <div className="market-snapshot"><div><span>TVL</span><strong>{vault.tvl}</strong></div><div><span>Vault APY</span><strong>{vault.apy}</strong></div><div><span>Type</span><strong>{vault.type}</strong></div><div><span>Risk</span><strong>{vault.risk}</strong></div></div>
-            <p className="snapshot-note">Reference snapshot supplied by the team · values are not live</p>
-            <div className="detail-list"><div><span>IBC receiver</span><code>{vault.address}</code></div><div><span>Transfer token</span><strong>{transferToken.symbol}</strong></div><div><span>Source balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.balanceBaseUnits, transferToken.decimals)} ${transferToken.symbol}` : '—'}</strong></div><div><span>Native gas balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.nativeGasBaseUnits, nativeToken.decimals)} ${nativeToken.symbol}` : '—'}</strong></div><div><span>Total transferred</span><strong>{formatBaseUnits(totalTransferred, transferToken.decimals)} {transferToken.symbol}</strong></div><div><span>Successful executions</span><strong>{successfulHistory.length}</strong></div></div>
-            <div className="interface-banner"><span>⌁</span><div><strong>{vault.address && vault.address !== 'Not configured' ? 'IBC MSGTRANSFER READY' : 'IBC_RECEIVER_NOT_CONFIGURED'}</strong><small>{vault.address && vault.address !== 'Not configured' ? `Transfers use ${ibcTransfer.sourcePort}/${ibcTransfer.sourceChannel} with a ${ibcTransfer.timeoutSeconds}s timeout.` : 'Add this vault IBC receiver address to the server environment before transfers can run.'}</small></div></div>
+            <div className="market-snapshot">
+              <div><span>TVL</span><strong>{vault.tvl}</strong></div>
+              <div><span>Vault APY</span><strong>{vault.apy}</strong></div>
+              <div><span>Type</span><strong>{vault.type}</strong></div>
+              <div><span>Risk</span><strong>{vault.risk}</strong></div>
+            </div>
+            <p className="snapshot-note">Verified vault contract destination</p>
+            <div className="detail-list">
+              <div><span>Vault Target</span><code>{vault.address}</code></div>
+              <div><span>Asset / Token</span><strong>{currentTokenSymbol}</strong></div>
+              <div><span>Source Balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.balanceBaseUnits, currentTokenDecimals)} ${currentTokenSymbol}` : '—'}</strong></div>
+              <div><span>Decimals</span><strong>{currentTokenDecimals}</strong></div>
+              <div><span>Total Transferred</span><strong>{formatBaseUnits(totalTransferred, currentTokenDecimals)} {currentTokenSymbol}</strong></div>
+              <div><span>Execution Count</span><strong>{successfulHistory.length}</strong></div>
+            </div>
+            <div className="interface-banner">
+              <span>⌁</span>
+              <div>
+                <strong>{vault.address && vault.address !== 'Not configured' ? `${vault.chainType === 'erc' ? 'ERC / EVM' : 'COSMOS'} TRANSFER READY` : 'VAULT_NOT_CONFIGURED'}</strong>
+                <small>
+                  {vault.chainType === 'erc'
+                    ? `Transfers use EVM RPC (${evmConfig.rpcUrl}) with direct private key execution.`
+                    : `Transfers execute on ${chainConfig.name} with standard Cosmos signing.`}
+                </small>
+              </div>
+            </div>
           </article>
         </section>
 
+        {/* Strategy Configuration */}
         <section className="console-card strategy-card">
-          <div className="card-title"><span className="title-icon orange">◷</span><div><h2>Strategy Configuration</h2><p>Independent settings for {vault.pair}.</p></div><span className="independent-pill">INDEPENDENT SCHEDULE</span></div>
-          <div className="delivery-mode" aria-label="Transfer mode">
-            <button className={automation.mode === 'once' ? 'active' : ''} type="button" disabled={automation.status === 'running'} onClick={() => selectDeliveryMode('once')}><strong>Send once</strong><small>One transfer using an exact amount</small></button>
-            <button className={automation.mode === 'automation' ? 'active' : ''} type="button" disabled={automation.status === 'running'} onClick={() => selectDeliveryMode('automation')}><strong>Automation</strong><small>Repeat within an amount range</small></button>
+          <div className="card-title">
+            <span className="title-icon orange">◷</span>
+            <div>
+              <h2>Strategy Configuration</h2>
+              <p>Independent schedule and amounts for {vault.name}.</p>
+            </div>
+            <span className="independent-pill">INDEPENDENT SCHEDULE</span>
           </div>
-          <div className="direction-bar"><span className="active">SOURCE WALLET <b>→</b> {vault.name.toUpperCase()}</span><span>IBC MSGTRANSFER</span></div>
-          <div className={`amount-grid ${automation.mode === 'once' ? 'single' : ''}`}><label><span>{automation.mode === 'once' ? 'AMOUNT TO SEND' : 'MINIMUM AMOUNT'}</span><div><input value={automation.minimum} onChange={(event) => updateSelectedAutomation({ minimum: event.target.value })} disabled={automation.status === 'running'} inputMode="decimal" placeholder="e.g. 0.1" /><b>{transferToken.symbol}</b></div></label><label className="max-field" aria-hidden={automation.mode === 'once'}><span>MAXIMUM AMOUNT</span><div><input value={automation.maximum} onChange={(event) => updateSelectedAutomation({ maximum: event.target.value })} disabled={automation.status === 'running' || automation.mode === 'once'} inputMode="decimal" placeholder="Blank uses minimum" tabIndex={automation.mode === 'once' ? -1 : 0} /><b>{transferToken.symbol}</b></div></label></div>
-          <div className="amount-note"><b>Note:</b> {automation.mode === 'once' ? 'Send once transfers exactly the amount entered above.' : 'Each run chooses an amount between minimum and maximum. Failed transactions automatically pause this vault.'} {transferToken.symbol} uses {transferToken.decimals} decimals.</div>
+
+          <div className="delivery-mode" aria-label="Transfer mode">
+            <button className={automation.mode === 'once' ? 'active' : ''} type="button" disabled={automation.status === 'running'} onClick={() => selectDeliveryMode('once')}>
+              <strong>Send once</strong>
+              <small>One transfer using an exact amount</small>
+            </button>
+            <button className={automation.mode === 'automation' ? 'active' : ''} type="button" disabled={automation.status === 'running'} onClick={() => selectDeliveryMode('automation')}>
+              <strong>Automation</strong>
+              <small>Repeat within an amount range</small>
+            </button>
+          </div>
+
+          <div className="direction-bar">
+            <span className="active">SOURCE WALLET <b>→</b> {vault.name.toUpperCase()}</span>
+            <span>{vault.chainType === 'erc' ? 'EVM TRANSFER' : 'COSMOS TRANSFER'}</span>
+          </div>
+
+          <div className={`amount-grid ${automation.mode === 'once' ? 'single' : ''}`}>
+            <label>
+              <span>{automation.mode === 'once' ? 'AMOUNT TO SEND' : 'MINIMUM AMOUNT'}</span>
+              <div>
+                <input
+                  value={automation.minimum}
+                  onChange={(event) => updateSelectedAutomation({ minimum: event.target.value })}
+                  disabled={automation.status === 'running'}
+                  inputMode="decimal"
+                  placeholder="e.g. 0.1"
+                />
+                <b>{currentTokenSymbol}</b>
+              </div>
+            </label>
+            <label className="max-field" aria-hidden={automation.mode === 'once'}>
+              <span>MAXIMUM AMOUNT</span>
+              <div>
+                <input
+                  value={automation.maximum}
+                  onChange={(event) => updateSelectedAutomation({ maximum: event.target.value })}
+                  disabled={automation.status === 'running' || automation.mode === 'once'}
+                  inputMode="decimal"
+                  placeholder="Blank uses minimum"
+                  tabIndex={automation.mode === 'once' ? -1 : 0}
+                />
+                <b>{currentTokenSymbol}</b>
+              </div>
+            </label>
+          </div>
+
+          <div className="amount-note">
+            <b>Note:</b> {automation.mode === 'once' ? 'Send once transfers exactly the amount entered above.' : 'Each run chooses an amount between minimum and maximum. Failed transactions automatically pause this vault.'} {currentTokenSymbol} uses {currentTokenDecimals} decimals.
+          </div>
+
           {actionHint && <p className="action-hint">{actionHint}</p>}
-          {transferStatus && <div className={`transfer-status ${transferStatus.kind}`} role="status"><strong>{transferStatus.kind === 'success' ? 'TRANSFER CONFIRMED' : 'TRANSFER NOT SENT'}</strong><span>{transferStatus.message}</span>{transferStatus.hash && <code>{transferStatus.hash}</code>}</div>}
-          <div className={`automation-fields ${automation.mode === 'automation' ? 'expanded' : ''}`} aria-hidden={automation.mode !== 'automation'}><div><div className="frequency-row"><div><span>EXECUTION FREQUENCY</span><small>Choose a preset or set your own interval</small></div><div className="frequency-options">{intervals.map((item) => <button className={!automation.customInterval && automation.interval === item.value ? 'active' : ''} key={item.value} type="button" disabled={automation.status === 'running'} onClick={() => updateSelectedAutomation({ interval: item.value, customInterval: '' })}>{item.label}</button>)}<label className={automation.customInterval ? 'custom-frequency active' : 'custom-frequency'}><input type="number" min="5" step="1" value={automation.customInterval} disabled={automation.status === 'running' || automation.mode !== 'automation'} onChange={(event) => setCustomFrequency(event.target.value)} placeholder="Custom" tabIndex={automation.mode === 'automation' ? 0 : -1} /><span>sec</span></label></div></div></div></div>
-          <div className="execution-strip"><div><span className={`execution-light ${automation.status}`} /><span><small>CURRENT STATUS</small><strong>{sendingVaults.includes(selectedVault) ? 'SENDING' : automation.mode === 'once' ? 'READY' : statusLabel}</strong></span></div><div><small>LAST EXECUTION</small><strong>{automation.lastAt ? new Date(automation.lastAt).toLocaleTimeString() : 'Never'}</strong></div><div><small>NEXT EXECUTION</small><strong>{automation.mode === 'once' ? 'Not scheduled' : automation.status === 'running' ? formatCountdown(automation.nextAt, now) : '—'}</strong></div><div className="strategy-actions">{automation.mode === 'once' ? <button className="manual-send primary-action" type="button" onClick={sendManualTransfer} disabled={!canSend(selectedVault) || sendingVaults.includes(selectedVault)}>SEND ONCE</button> : <><button type="button" onClick={() => pauseAutomation(selectedVault)} disabled={automation.status !== 'running'}>PAUSE</button><button className="danger" type="button" onClick={() => stopAutomation(selectedVault)} disabled={automation.status === 'stopped'}>STOP</button><button className="start" type="button" onClick={() => startAutomation(selectedVault)} disabled={!canAutomate(selectedVault) || automation.status === 'running'}>{automation.status === 'paused' ? 'RESUME' : 'START AUTOMATION'}</button></>}</div></div>
+          {transferStatus && (
+            <div className={`transfer-status ${transferStatus.kind}`} role="status">
+              <strong>{transferStatus.kind === 'success' ? 'TRANSFER CONFIRMED' : 'TRANSFER NOT SENT'}</strong>
+              <span>{transferStatus.message}</span>
+              {transferStatus.hash && <code>{transferStatus.hash}</code>}
+            </div>
+          )}
+
+          <div className={`automation-fields ${automation.mode === 'automation' ? 'expanded' : ''}`} aria-hidden={automation.mode !== 'automation'}>
+            <div>
+              <div className="frequency-row">
+                <div>
+                  <span>EXECUTION FREQUENCY</span>
+                  <small>Choose a preset or set your own interval</small>
+                </div>
+                <div className="frequency-options">
+                  {intervals.map((item) => (
+                    <button
+                      className={!automation.customInterval && automation.interval === item.value ? 'active' : ''}
+                      key={item.value}
+                      type="button"
+                      disabled={automation.status === 'running'}
+                      onClick={() => updateSelectedAutomation({ interval: item.value, customInterval: '' })}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                  <label className={automation.customInterval ? 'custom-frequency active' : 'custom-frequency'}>
+                    <input
+                      type="number"
+                      min="5"
+                      step="1"
+                      value={automation.customInterval}
+                      disabled={automation.status === 'running' || automation.mode !== 'automation'}
+                      onChange={(event) => setCustomFrequency(event.target.value)}
+                      placeholder="Custom"
+                      tabIndex={automation.mode === 'automation' ? 0 : -1}
+                    />
+                    <span>sec</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="execution-strip">
+            <div>
+              <span className={`execution-light ${automation.status}`} />
+              <span>
+                <small>CURRENT STATUS</small>
+                <strong>{sendingVaults.includes(selectedVault) ? 'SENDING' : automation.mode === 'once' ? 'READY' : statusLabel}</strong>
+              </span>
+            </div>
+            <div>
+              <small>LAST EXECUTION</small>
+              <strong>{automation.lastAt ? new Date(automation.lastAt).toLocaleTimeString() : 'Never'}</strong>
+            </div>
+            <div>
+              <small>NEXT EXECUTION</small>
+              <strong>{automation.mode === 'once' ? 'Not scheduled' : automation.status === 'running' ? formatCountdown(automation.nextAt, now) : '—'}</strong>
+            </div>
+            <div className="strategy-actions">
+              {automation.mode === 'once' ? (
+                <button
+                  className="manual-send primary-action"
+                  type="button"
+                  onClick={sendManualTransfer}
+                  disabled={!canSend(selectedVault) || sendingVaults.includes(selectedVault)}
+                >
+                  SEND ONCE
+                </button>
+              ) : (
+                <>
+                  <button type="button" onClick={() => pauseAutomation(selectedVault)} disabled={automation.status !== 'running'}>
+                    PAUSE
+                  </button>
+                  <button className="danger" type="button" onClick={() => stopAutomation(selectedVault)} disabled={automation.status === 'stopped'}>
+                    STOP
+                  </button>
+                  <button
+                    className="start"
+                    type="button"
+                    onClick={() => startAutomation(selectedVault)}
+                    disabled={!canAutomate(selectedVault) || automation.status === 'running'}
+                  >
+                    {automation.status === 'paused' ? 'RESUME' : 'START AUTOMATION'}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
         </section>
 
+        {/* History */}
         <section className="console-card history-card">
-          <div className="history-header"><div className="card-title"><span className="title-icon purple">↗</span><div><h2>Transaction History</h2><p>{vault.pair} · {vault.name}</p></div></div><div className="history-filters">{['All','Success','Pending','Failed'].map((item) => <button className={historyFilter === item ? 'active' : ''} type="button" key={item} onClick={() => setHistoryFilter(item)}>{item}</button>)}</div></div>
-          <div className="table-head"><span>TIME</span><span>AMOUNT</span><span>STATUS</span><span>TRANSACTION</span></div>
-          {selectedHistory.length ? selectedHistory.map((entry) => <div className="history-row" key={entry.id} title={entry.error}><span>{new Date(entry.time).toLocaleTimeString()} <small>{entry.source}</small></span><strong>{formatBaseUnits(entry.amountBaseUnits, transferToken.decimals)} {transferToken.symbol}</strong><span className={`history-status ${entry.status.toLowerCase()}`}>{entry.status}</span><div className="tx-cell"><code>{entry.hash ? `${entry.hash.slice(0, 10)}…${entry.hash.slice(-6)}` : entry.error ? entry.error.slice(0, 34) : 'Broadcasting…'}</code>{entry.hash && <button className={copiedHash === entry.hash ? 'copied' : ''} type="button" aria-label={copiedHash === entry.hash ? 'Transaction hash copied' : 'Copy transaction hash'} title={copiedHash === entry.hash ? 'Copied' : 'Copy transaction hash'} onClick={() => void copyTransactionHash(entry.hash!)}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg></button>}</div></div>) : <div className="history-empty"><span>↗</span><strong>No {historyFilter.toLowerCase()} transactions</strong><p>Transactions for this wallet and vault will appear here.</p></div>}
+          <div className="history-header">
+            <div className="card-title">
+              <span className="title-icon purple">↗</span>
+              <div>
+                <h2>Transaction History</h2>
+                <p>{vault.pair} · {vault.name}</p>
+              </div>
+            </div>
+            <div className="history-filters">
+              {['All', 'Success', 'Pending', 'Failed'].map((item) => (
+                <button className={historyFilter === item ? 'active' : ''} type="button" key={item} onClick={() => setHistoryFilter(item)}>
+                  {item}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="table-head">
+            <span>TIME</span>
+            <span>AMOUNT</span>
+            <span>STATUS</span>
+            <span>TRANSACTION</span>
+          </div>
+          {selectedHistory.length ? (
+            selectedHistory.map((entry) => (
+              <div className="history-row" key={entry.id} title={entry.error}>
+                <span>{new Date(entry.time).toLocaleTimeString()} <small>{entry.source}</small></span>
+                <strong>{formatBaseUnits(entry.amountBaseUnits, currentTokenDecimals)} {currentTokenSymbol}</strong>
+                <span className={`history-status ${entry.status.toLowerCase()}`}>{entry.status}</span>
+                <div className="tx-cell">
+                  <code>{entry.hash ? `${entry.hash.slice(0, 10)}…${entry.hash.slice(-6)}` : entry.error ? entry.error.slice(0, 34) : 'Broadcasting…'}</code>
+                  {entry.hash && (
+                    <button
+                      className={copiedHash === entry.hash ? 'copied' : ''}
+                      type="button"
+                      aria-label={copiedHash === entry.hash ? 'Transaction hash copied' : 'Copy transaction hash'}
+                      title={copiedHash === entry.hash ? 'Copied' : 'Copy transaction hash'}
+                      onClick={() => void copyTransactionHash(entry.hash!)}
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="history-empty">
+              <span>↗</span>
+              <strong>No {historyFilter.toLowerCase()} transactions</strong>
+              <p>Transactions for this wallet and vault will appear here.</p>
+            </div>
+          )}
         </section>
       </div>
     </main>

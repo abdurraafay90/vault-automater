@@ -14,6 +14,7 @@
   "dependencies": {
     "@cosmjs/proto-signing": "^0.38.1",
     "@cosmjs/stargate": "^0.38.1",
+    "ethers": "^6.17.0",
     "next": "16.3.3",
     "react": "19.2.6",
     "react-dom": "19.2.6"
@@ -37,5 +38,9 @@
     "vite": "8.0.13",
     "wrangler": "4.92.0"
   },
-  "type": "module"
+  "type": "module",
+  "optionalDependencies": {
+    "@rolldown/binding-linux-x64-musl": "^1.0.1",
+    "@rolldown/binding-win32-x64-msvc": "^1.0.1"
+  }
 }

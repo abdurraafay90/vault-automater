@@ -14,4 +14,5 @@ if (missing.length > 0) {
   process.exitCode = 1;
 } else {
   console.info({ event: 'worker_ready', blockchainStatus: 'VAULT_INTERFACE_NOT_CONFIGURED' });
+  setInterval(() => {}, 60_000);
 }
