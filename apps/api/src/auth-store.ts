@@ -151,3 +151,9 @@ export function createCustomVault(data: { name: string; address: string; chainTy
   `).run(id, data.name.trim(), data.address.trim(), data.chainType, tokenSymbol, tokenDecimals, summary, createdAt);
   return { id, name: data.name.trim(), address: data.address.trim(), chainType: data.chainType, tokenSymbol, tokenDecimals, summary, createdAt };
 }
+
+export function deleteCustomVault(id: string): boolean {
+  const result = database.prepare('DELETE FROM custom_vaults WHERE id = ?').run(id);
+  return (result.changes ?? 0) > 0;
+}
+

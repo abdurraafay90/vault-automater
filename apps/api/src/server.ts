@@ -4,7 +4,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { authenticate, createCustomVault, createSession, createUser, ensureAdmin, listCustomVaults, listUsers, revokeSession, type AuthUser, userForSession } from './auth-store.js';
+import { authenticate, createCustomVault, createSession, createUser, deleteCustomVault, ensureAdmin, listCustomVaults, listUsers, revokeSession, type AuthUser, userForSession } from './auth-store.js';
 import { config, vaultsConfigured } from './config.js';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization', 'req.headers.cookie', '*.privateKey', '*.mnemonic', '*.secret'] } });
@@ -22,7 +22,8 @@ function currentUser(request: FastifyRequest) { return requestUsers.get(request)
 
 app.addHook('preHandler', async (request, reply) => {
   const path = request.url.split('?')[0] ?? request.url;
-  if (!path.startsWith('/api/') || path === '/api/auth/login' || path === '/api/config/public' || path === '/api/vaults/custom') return;
+  if (!path.startsWith('/api/') || path === '/api/auth/login' || path === '/api/config/public' || path.startsWith('/api/vaults/custom')) return;
+
   const token = request.cookies[SESSION_COOKIE];
   const user = token ? userForSession(token) : null;
   if (!user) return reply.code(401).send({ code: 'AUTHENTICATION_REQUIRED' });
@@ -91,6 +92,14 @@ app.post('/api/vaults/custom', async (request, reply) => {
   const vault = createCustomVault(input.data);
   return reply.code(201).send({ vault });
 });
+
+app.delete('/api/vaults/custom/:id', async (request, reply) => {
+  const params = z.object({ id: z.string().min(1) }).safeParse(request.params);
+  if (!params.success) return reply.code(400).send({ code: 'INVALID_VAULT_ID' });
+  const deleted = deleteCustomVault(params.data.id);
+  return reply.code(200).send({ success: true, deleted });
+});
+
 
 app.get('/api/config/public', async () => ({
   chain: { type: config.CHAIN_TYPE ?? 'cosmos-sdk', name: config.CHAIN_NAME, id: config.CHAIN_ID, rpcUrl: config.RPC_URL, apiUrl: config.API_URL, explorerUrl: config.BLOCK_EXPLORER_URL },

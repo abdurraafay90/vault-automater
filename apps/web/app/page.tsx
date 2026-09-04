@@ -206,6 +206,12 @@ export default function Home() {
   const [addVaultError, setAddVaultError] = useState('');
   const [savingVault, setSavingVault] = useState(false);
 
+  // Delete Vault Modal State
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [vaultToDelete, setVaultToDelete] = useState<{ index: number; vault: Vault } | null>(null);
+  const [deletingVault, setDeletingVault] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
   const secretInputRef = useRef<HTMLInputElement>(null);
   const signersRef = useRef<Record<number, UniversalSigner | null>>({});
   const walletSessionsRef = useRef<WalletSession[]>(walletSessions);
@@ -261,14 +267,21 @@ export default function Home() {
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
-        if (addVaultOpen) setAddVaultOpen(false);
-        else if (sidebarOpen) setSidebarOpen(false);
-        else if (adminOpen) setAdminOpen(false);
+        if (deleteModalOpen) {
+          setDeleteModalOpen(false);
+          setVaultToDelete(null);
+        } else if (addVaultOpen) {
+          setAddVaultOpen(false);
+        } else if (sidebarOpen) {
+          setSidebarOpen(false);
+        } else if (adminOpen) {
+          setAdminOpen(false);
+        }
       }
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [addVaultOpen, sidebarOpen, adminOpen]);
+  }, [addVaultOpen, sidebarOpen, adminOpen, deleteModalOpen]);
 
   function patchAutomation(index: number, patch: Partial<Automation>) {
     const next = automationsRef.current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
@@ -343,13 +356,22 @@ export default function Home() {
       try {
         const localCustom = JSON.parse(localStorage.getItem('vaultflow_custom_vaults') || '[]') as Vault[];
         localCustom.forEach((lv) => {
-          if (!customVaults.some((cv) => cv.address === lv.address)) {
+          if (!customVaults.some((cv) => cv.address === lv.address || cv.id === lv.id)) {
             customVaults.push(lv);
           }
         });
       } catch {}
 
-      const allVaults = [...baseVaults, ...customVaults];
+      // Retrieve deleted vaults blacklist from localStorage
+      let deletedVaultIds: string[] = [];
+      try {
+        deletedVaultIds = JSON.parse(localStorage.getItem('vaultflow_deleted_vaults') || '[]') as string[];
+      } catch {}
+
+      const allVaultsRaw = [...baseVaults, ...customVaults];
+      const allVaultsFiltered = allVaultsRaw.filter((v) => !deletedVaultIds.includes(v.id));
+      const allVaults = allVaultsFiltered.length > 0 ? allVaultsFiltered : baseVaults;
+
       chainConfigRef.current = nextChainConfig;
       evmConfigRef.current = nextEvmConfig;
       transferTokenRef.current = nextTransferToken;
@@ -887,10 +909,24 @@ export default function Home() {
       const decimals = newVaultDecimals.trim() ? Number(newVaultDecimals) : (newVaultChain === 'erc' ? 18 : 6);
       const summary = newVaultSummary.trim() || `${newVaultChain === 'erc' ? 'ERC / EVM' : 'ZIGChain'} custom automated vault strategy`;
 
+      let createdId = `custom-${unixNow()}`;
+      // Save to API (best effort)
+      try {
+        const createRes = await apiRequest('/api/vaults/custom', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, address, chainType: newVaultChain, tokenSymbol: symbol, tokenDecimals: decimals, summary }),
+        });
+        if (createRes.ok) {
+          const createData = await createRes.json() as { vault?: { id: string } };
+          if (createData.vault?.id) createdId = createData.vault.id;
+        }
+      } catch {}
+
       const newIndex = vaults.length;
       const newPair = newVaultChain === 'erc' ? `ERC ${newIndex - 2}` : `PAIR ${newIndex + 1}`;
       const newVault: Vault = {
-        id: `custom-${unixNow()}`,
+        id: createdId,
         pair: newPair,
         name,
         address,
@@ -904,15 +940,6 @@ export default function Home() {
         tokenSymbol: symbol,
         tokenDecimals: decimals,
       };
-
-      // Save to API (best effort)
-      try {
-        await apiRequest('/api/vaults/custom', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, address, chainType: newVaultChain, tokenSymbol: symbol, tokenDecimals: decimals, summary }),
-        });
-      } catch {}
 
       const updatedVaults = [...vaults, newVault];
       vaultsRef.current = updatedVaults;
@@ -941,6 +968,136 @@ export default function Home() {
       setSavingVault(false);
     }
   }
+
+  function handleRequestDelete(index: number, targetVault: Vault, e?: React.MouseEvent) {
+    if (e) e.stopPropagation();
+    if (vaults.length <= 1) {
+      alert('Cannot delete the last remaining vault. At least one vault must remain configured.');
+      return;
+    }
+    setDeleteError('');
+    setVaultToDelete({ index, vault: targetVault });
+    setDeleteModalOpen(true);
+  }
+
+  async function handleConfirmDelete() {
+    if (!vaultToDelete) return;
+    const { index: targetIndex, vault: targetVault } = vaultToDelete;
+    if (vaults.length <= 1) {
+      setDeleteError('Cannot delete the last remaining vault.');
+      return;
+    }
+    setDeletingVault(true);
+    setDeleteError('');
+
+    try {
+      // 1. Clear active automation timer for this vault
+      if (timersRef.current[targetIndex]) {
+        clearTimeout(timersRef.current[targetIndex]!);
+        timersRef.current[targetIndex] = null;
+      }
+
+      // 2. Clear signer from memory
+      signersRef.current[targetIndex] = null;
+
+      // 3. Delete from backend if it is a custom vault
+      if (
+        targetVault.id &&
+        targetVault.id.startsWith('vault-') &&
+        !['vault-1', 'vault-2', 'vault-3', 'vault-4', 'vault-5'].includes(targetVault.id)
+      ) {
+        try {
+          await apiRequest(`/api/vaults/custom/${encodeURIComponent(targetVault.id)}`, { method: 'DELETE' });
+        } catch {}
+      }
+
+      // 4. Update localStorage
+      try {
+        const storedCustom = JSON.parse(localStorage.getItem('vaultflow_custom_vaults') || '[]') as Vault[];
+        const filteredCustom = storedCustom.filter((v) => v.id !== targetVault.id && v.address !== targetVault.address);
+        localStorage.setItem('vaultflow_custom_vaults', JSON.stringify(filteredCustom));
+      } catch {}
+
+      try {
+        const deletedVaultIds = JSON.parse(localStorage.getItem('vaultflow_deleted_vaults') || '[]') as string[];
+        if (!deletedVaultIds.includes(targetVault.id)) {
+          deletedVaultIds.push(targetVault.id);
+          localStorage.setItem('vaultflow_deleted_vaults', JSON.stringify(deletedVaultIds));
+        }
+      } catch {}
+
+      // 5. Shift refs
+      const nextTimers: Record<number, ReturnType<typeof setTimeout> | null> = {};
+      const nextSigners: Record<number, UniversalSigner | null> = {};
+      const nextGens: Record<number, number> = {};
+      Object.keys(timersRef.current).forEach((k) => {
+        const keyNum = Number(k);
+        if (keyNum < targetIndex) nextTimers[keyNum] = timersRef.current[keyNum];
+        else if (keyNum > targetIndex) nextTimers[keyNum - 1] = timersRef.current[keyNum];
+      });
+      Object.keys(signersRef.current).forEach((k) => {
+        const keyNum = Number(k);
+        if (keyNum < targetIndex) nextSigners[keyNum] = signersRef.current[keyNum];
+        else if (keyNum > targetIndex) nextSigners[keyNum - 1] = signersRef.current[keyNum];
+      });
+      Object.keys(sessionGenerationRef.current).forEach((k) => {
+        const keyNum = Number(k);
+        if (keyNum < targetIndex) nextGens[keyNum] = sessionGenerationRef.current[keyNum];
+        else if (keyNum > targetIndex) nextGens[keyNum - 1] = sessionGenerationRef.current[keyNum];
+      });
+      timersRef.current = nextTimers;
+      signersRef.current = nextSigners;
+      sessionGenerationRef.current = nextGens;
+
+      // 6. Update state arrays
+      const nextVaults = vaults.filter((_, i) => i !== targetIndex);
+      vaultsRef.current = nextVaults;
+      setVaults(nextVaults);
+
+      setAutomations((cur) => {
+        const next = cur.filter((_, i) => i !== targetIndex);
+        automationsRef.current = next;
+        return next;
+      });
+
+      setWalletSessions((cur) => {
+        const next = cur.filter((_, i) => i !== targetIndex);
+        walletSessionsRef.current = next;
+        return next;
+      });
+
+      setHistory((cur) =>
+        cur
+          .filter((entry) => entry.vaultIndex !== targetIndex)
+          .map((entry) => ({
+            ...entry,
+            vaultIndex: entry.vaultIndex > targetIndex ? entry.vaultIndex - 1 : entry.vaultIndex,
+          }))
+      );
+
+      // 7. Adjust selectedVault index
+      if (selectedVault === targetIndex) {
+        setSelectedVault(Math.max(0, Math.min(targetIndex, nextVaults.length - 1)));
+      } else if (selectedVault > targetIndex) {
+        setSelectedVault((cur) => cur - 1);
+      }
+
+      setDeleteModalOpen(false);
+      setVaultToDelete(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Failed to delete vault.');
+    } finally {
+      setDeletingVault(false);
+    }
+  }
+
+  function handleResetDefaultVaults() {
+    try {
+      localStorage.removeItem('vaultflow_deleted_vaults');
+    } catch {}
+    void loadConfig();
+  }
+
 
   const statusLabel = automation.status.toUpperCase();
   const automatedVaultIndexes = automations.map((item, index) => item.mode === 'automation' ? index : -1).filter((index) => index >= 0);
@@ -1031,37 +1188,47 @@ export default function Home() {
             .map((item, index) => ({ item, index }))
             .filter(({ item }) => sidebarFilter === 'all' || item.chainType === sidebarFilter)
             .map(({ item, index }) => (
-              <button
-                key={item.id || item.pair}
-                type="button"
-                className={`sidebar-vault-item ${selectedVault === index ? 'active' : ''}`}
-                onClick={() => {
-                  setSelectedVault(index);
-                  setSidebarOpen(false);
-                }}
-              >
-                <div className="sidebar-vault-top">
-                  <span className={`chain-pill ${item.chainType}`}>
-                    {item.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'}
-                  </span>
-                  <span className="sidebar-vault-pair">{item.pair}</span>
-                  {walletSessions[index]?.source && (
-                    <span className="sidebar-vault-connected" title="Signer unlocked">● UNLOCKED</span>
-                  )}
-                  <span className={`pair-dot ${item.accent}`} />
-                </div>
-                <div className="sidebar-vault-name">{item.name}</div>
-                <div className="sidebar-vault-meta">
-                  <span className="sidebar-vault-stat"><strong>{item.apy}</strong> APY</span>
-                  <span className="sidebar-vault-stat"><strong>{item.tvl}</strong> TVL</span>
-                  <span className="sidebar-vault-risk">{item.risk} Risk</span>
-                </div>
-                {item.address && item.address !== 'Not configured' && (
-                  <div className="sidebar-vault-address">
-                    <code>{item.address.slice(0, 10)}...{item.address.slice(-6)}</code>
+              <div key={item.id || item.pair} className="sidebar-vault-item-wrap">
+                <button
+                  type="button"
+                  className={`sidebar-vault-item ${selectedVault === index ? 'active' : ''}`}
+                  onClick={() => {
+                    setSelectedVault(index);
+                    setSidebarOpen(false);
+                  }}
+                >
+                  <div className="sidebar-vault-top">
+                    <span className={`chain-pill ${item.chainType}`}>
+                      {item.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'}
+                    </span>
+                    <span className="sidebar-vault-pair">{item.pair}</span>
+                    {walletSessions[index]?.source && (
+                      <span className="sidebar-vault-connected" title="Signer unlocked">● UNLOCKED</span>
+                    )}
+                    <span className={`pair-dot ${item.accent}`} />
                   </div>
-                )}
-              </button>
+                  <div className="sidebar-vault-name">{item.name}</div>
+                  <div className="sidebar-vault-meta">
+                    <span className="sidebar-vault-stat"><strong>{item.apy}</strong> APY</span>
+                    <span className="sidebar-vault-stat"><strong>{item.tvl}</strong> TVL</span>
+                    <span className="sidebar-vault-risk">{item.risk} Risk</span>
+                  </div>
+                  {item.address && item.address !== 'Not configured' && (
+                    <div className="sidebar-vault-address">
+                      <code>{item.address.slice(0, 10)}...{item.address.slice(-6)}</code>
+                    </div>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="sidebar-vault-delete-btn"
+                  title={`Delete ${item.name}`}
+                  onClick={(e) => handleRequestDelete(index, item, e)}
+                  aria-label={`Delete ${item.name}`}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                </button>
+              </div>
             ))}
         </div>
 
@@ -1075,6 +1242,14 @@ export default function Home() {
             }}
           >
             + ADD ANOTHER VAULT
+          </button>
+          <button
+            type="button"
+            className="sidebar-reset-defaults-btn"
+            onClick={handleResetDefaultVaults}
+            title="Restore default pre-configured vaults if any were deleted"
+          >
+            RESTORE DEFAULT VAULTS
           </button>
         </div>
       </aside>
@@ -1264,6 +1439,79 @@ export default function Home() {
         </div>
       )}
 
+      {/* Delete Vault Confirmation Modal */}
+      {deleteModalOpen && vaultToDelete && (
+        <div className="admin-overlay" role="dialog" aria-modal="true" aria-label="Delete vault confirmation">
+          <section className="delete-vault-panel">
+            <header className="delete-vault-header">
+              <div className="delete-warning-icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+              </div>
+              <div style={{ flex: 1 }}>
+                <span className="danger-tag">CONFIRM DELETION</span>
+                <h2>Delete Vault Strategy?</h2>
+                <p>Are you sure you want to permanently delete <strong>{vaultToDelete.vault.name}</strong> ({vaultToDelete.vault.pair})?</p>
+              </div>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => { setDeleteModalOpen(false); setVaultToDelete(null); }}
+                aria-label="Close delete modal"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+              </button>
+            </header>
+
+            <div className="delete-vault-body">
+              <div className="delete-vault-info">
+                <div className="delete-info-row">
+                  <span>Vault:</span>
+                  <strong>{vaultToDelete.vault.name}</strong>
+                </div>
+                <div className="delete-info-row">
+                  <span>Chain:</span>
+                  <span className={`chain-pill ${vaultToDelete.vault.chainType}`}>
+                    {vaultToDelete.vault.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'}
+                  </span>
+                </div>
+                {vaultToDelete.vault.address && vaultToDelete.vault.address !== 'Not configured' && (
+                  <div className="delete-info-row">
+                    <span>Target Address:</span>
+                    <code>{vaultToDelete.vault.address}</code>
+                  </div>
+                )}
+              </div>
+
+              <div className="delete-warning-box">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg>
+                <span>Any active automation schedules and signing sessions for this vault will be stopped immediately.</span>
+              </div>
+
+              {deleteError && <p className="delete-vault-error" role="alert">{deleteError}</p>}
+
+              <div className="delete-modal-actions">
+                <button
+                  type="button"
+                  className="cancel-delete-btn"
+                  onClick={() => { setDeleteModalOpen(false); setVaultToDelete(null); }}
+                  disabled={deletingVault}
+                >
+                  CANCEL
+                </button>
+                <button
+                  type="button"
+                  className="confirm-delete-btn"
+                  onClick={() => void handleConfirmDelete()}
+                  disabled={deletingVault}
+                >
+                  {deletingVault ? 'DELETING…' : 'YES, DELETE VAULT'}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
+
       <div className="console-content">
         <header className="vault-hero">
           <div className="hero-title">
@@ -1276,6 +1524,15 @@ export default function Home() {
             <span className="state-pill"><i /> TIMER READY</span>
             <span className={`state-pill ${automation.status}`}>{statusLabel}</span>
             <button className="hero-add-vault-btn" type="button" onClick={() => setAddVaultOpen(true)}>+ ADD VAULT</button>
+            <button
+              className="hero-delete-vault-btn"
+              type="button"
+              onClick={() => handleRequestDelete(selectedVault, vault)}
+              title="Delete this vault strategy"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+              DELETE VAULT
+            </button>
             <button type="button" onClick={() => void disconnectWallet(selectedVault)} disabled={!walletSession.source}>CLEAR SESSION</button>
           </div>
         </header>
