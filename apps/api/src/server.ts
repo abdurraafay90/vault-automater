@@ -93,6 +93,7 @@ app.post('/api/vaults/custom', async (request, reply) => {
     evmNetwork: z.enum(['mainnet', 'testnet']).optional(),
     tokenSymbol: z.string().min(1).max(16).optional(),
     tokenDecimals: z.coerce.number().int().min(0).max(255).optional(),
+    tokenAddress: z.string().optional(),
     summary: z.string().max(256).optional(),
   }).safeParse(request.body);
   if (!input.success) return reply.code(400).send({ code: 'INVALID_VAULT_PAYLOAD' });

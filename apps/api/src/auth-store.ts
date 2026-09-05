@@ -36,6 +36,7 @@ database.exec(`
     address TEXT NOT NULL,
     chain_type TEXT NOT NULL,
     evm_network TEXT,
+    token_address TEXT,
     token_symbol TEXT NOT NULL,
     token_decimals INTEGER NOT NULL,
     summary TEXT NOT NULL,
@@ -45,6 +46,16 @@ database.exec(`
 
 try {
   database.exec('ALTER TABLE custom_vaults ADD COLUMN evm_network TEXT');
+} catch {}
+try {
+  database.exec('ALTER TABLE custom_vaults ADD COLUMN token_address TEXT');
+} catch {}
+try {
+  database.exec(`
+    UPDATE custom_vaults
+    SET token_address = '0xebe4f4ac8a99979934aad3db24edd0caf6a6e934'
+    WHERE (LOWER(token_symbol) = 'musdc') AND (token_address IS NULL OR token_address = '')
+  `);
 } catch {}
 
 function normalizeEmail(email: string) { return email.trim().toLowerCase(); }
@@ -128,17 +139,19 @@ export type CustomVault = {
   evmNetwork?: 'mainnet' | 'testnet' | undefined;
   tokenSymbol: string;
   tokenDecimals: number;
+  tokenAddress?: string | undefined;
   summary: string;
   createdAt: string;
 };
 
 export function listCustomVaults(): CustomVault[] {
-  return (database.prepare('SELECT id, name, address, chain_type, evm_network, token_symbol, token_decimals, summary, created_at FROM custom_vaults ORDER BY created_at ASC').all() as Record<string, unknown>[]).map((row) => ({
+  return (database.prepare('SELECT id, name, address, chain_type, evm_network, token_address, token_symbol, token_decimals, summary, created_at FROM custom_vaults ORDER BY created_at ASC').all() as Record<string, unknown>[]).map((row) => ({
     id: String(row.id),
     name: String(row.name),
     address: String(row.address),
     chainType: (row.chain_type === 'erc' ? 'erc' : 'zigchain') as 'zigchain' | 'erc',
     evmNetwork: row.evm_network === 'mainnet' ? 'mainnet' : row.evm_network === 'testnet' ? 'testnet' : undefined,
+    tokenAddress: row.token_address ? String(row.token_address) : undefined,
     tokenSymbol: String(row.token_symbol || (row.chain_type === 'erc' ? 'ETH' : 'ZIG')),
     tokenDecimals: Number(row.token_decimals || (row.chain_type === 'erc' ? 18 : 6)),
     summary: String(row.summary || ''),
@@ -146,18 +159,19 @@ export function listCustomVaults(): CustomVault[] {
   }));
 }
 
-export function createCustomVault(data: { name: string; address: string; chainType: 'zigchain' | 'erc'; evmNetwork?: 'mainnet' | 'testnet' | undefined; tokenSymbol?: string | undefined; tokenDecimals?: number | undefined; summary?: string | undefined }): CustomVault {
+export function createCustomVault(data: { name: string; address: string; chainType: 'zigchain' | 'erc'; evmNetwork?: 'mainnet' | 'testnet' | undefined; tokenSymbol?: string | undefined; tokenDecimals?: number | undefined; tokenAddress?: string | undefined; summary?: string | undefined }): CustomVault {
   const id = `vault-${randomUUID()}`;
   const createdAt = new Date().toISOString();
   const tokenSymbol = data.tokenSymbol || (data.chainType === 'erc' ? 'ETH' : 'ZIG');
   const tokenDecimals = data.tokenDecimals ?? (data.chainType === 'erc' ? 18 : 6);
+  const tokenAddress = data.tokenAddress ? data.tokenAddress.trim() : null;
   const summary = data.summary || `${data.chainType === 'erc' ? 'ERC / EVM' : 'ZIGChain'} custom strategy`;
   const evmNetwork = data.chainType === 'erc' ? (data.evmNetwork || 'testnet') : null;
   database.prepare(`
-    INSERT INTO custom_vaults (id, name, address, chain_type, evm_network, token_symbol, token_decimals, summary, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, data.name.trim(), data.address.trim(), data.chainType, evmNetwork, tokenSymbol, tokenDecimals, summary, createdAt);
-  return { id, name: data.name.trim(), address: data.address.trim(), chainType: data.chainType, evmNetwork: evmNetwork || undefined, tokenSymbol, tokenDecimals, summary, createdAt };
+    INSERT INTO custom_vaults (id, name, address, chain_type, evm_network, token_address, token_symbol, token_decimals, summary, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, data.name.trim(), data.address.trim(), data.chainType, evmNetwork, tokenAddress, tokenSymbol, tokenDecimals, summary, createdAt);
+  return { id, name: data.name.trim(), address: data.address.trim(), chainType: data.chainType, evmNetwork: evmNetwork || undefined, tokenAddress: tokenAddress || undefined, tokenSymbol, tokenDecimals, summary, createdAt };
 }
 
 export function deleteCustomVault(id: string): boolean {
