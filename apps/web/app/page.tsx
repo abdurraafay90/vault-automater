@@ -725,15 +725,23 @@ export default function Home() {
   }, [addVaultOpen, sidebarOpen, adminOpen, deleteModalOpen]);
 
   function patchAutomation(index: number, patch: Partial<Automation>) {
-    const next = automationsRef.current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
-    automationsRef.current = next;
-    setAutomations(next);
+    setAutomations((cur) => {
+      const targetLen = Math.max(cur.length, automationsRef.current.length, index + 1);
+      const expanded = Array.from({ length: targetLen }, (_, i) => cur[i] ?? automationsRef.current[i] ?? { mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null });
+      const next = expanded.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
+      automationsRef.current = next;
+      return next;
+    });
   }
 
   function patchWalletSession(index: number, patch: Partial<WalletSession>) {
-    const next = walletSessionsRef.current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
-    walletSessionsRef.current = next;
-    setWalletSessions(next);
+    setWalletSessions((cur) => {
+      const targetLen = Math.max(cur.length, walletSessionsRef.current.length, index + 1);
+      const expanded = Array.from({ length: targetLen }, (_, i) => cur[i] ?? walletSessionsRef.current[i] ?? { mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false });
+      const next = expanded.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
+      walletSessionsRef.current = next;
+      return next;
+    });
   }
 
   function clearVaultTimer(index: number) {
@@ -828,8 +836,16 @@ export default function Home() {
       setVaults(allVaults);
 
       // Expand automations and sessions if more vaults loaded
-      setAutomations((cur) => cur.length < allVaults.length ? [...cur, ...createInitialAutomations(allVaults.length - cur.length)] : cur);
-      setWalletSessions((cur) => cur.length < allVaults.length ? [...cur, ...createInitialWalletSessions(allVaults.length - cur.length)] : cur);
+      setAutomations((cur) => {
+        const next = cur.length < allVaults.length ? [...cur, ...createInitialAutomations(allVaults.length - cur.length)] : cur;
+        automationsRef.current = next;
+        return next;
+      });
+      setWalletSessions((cur) => {
+        const next = cur.length < allVaults.length ? [...cur, ...createInitialWalletSessions(allVaults.length - cur.length)] : cur;
+        walletSessionsRef.current = next;
+        return next;
+      });
     } catch {}
   }
 
@@ -1482,8 +1498,13 @@ export default function Home() {
       vaultsRef.current = updatedVaults;
       setVaults(updatedVaults);
 
-      setAutomations((cur) => [...cur, { mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null }]);
-      setWalletSessions((cur) => [...cur, { mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false }]);
+      const nextAutomations = [...automationsRef.current, { mode: 'once' as const, minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped' as const, lastAt: null, nextAt: null }];
+      automationsRef.current = nextAutomations;
+      setAutomations(nextAutomations);
+
+      const nextWalletSessions = [...walletSessionsRef.current, { mode: 'private' as const, source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false }];
+      walletSessionsRef.current = nextWalletSessions;
+      setWalletSessions(nextWalletSessions);
 
       // Persist to localStorage
       try {
