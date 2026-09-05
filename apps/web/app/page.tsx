@@ -62,11 +62,12 @@ const defaultChainConfig: ChainConfig = {
 };
 
 const defaultEvmConfig: EvmConfig = {
-  rpcUrl: 'https://rpc.testnet.zigchain.com',
-  chainId: 11155111,
-  explorerUrl: 'https://testnet.zigscan.org',
+  rpcUrl: 'https://eth-mainnet.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
+  chainId: 1,
+  explorerUrl: 'https://etherscan.io',
   nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
 };
+
 
 const defaultTokenConfig: TokenConfig = { symbol: 'ZIG', denom: 'uzig', decimals: 6 };
 
