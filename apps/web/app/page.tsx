@@ -34,6 +34,7 @@ export type Vault = {
   detectedAsset?: VaultAsset | null;
   selectedAssetSymbol?: string;
   customAsset?: VaultAsset | null;
+  evmNetwork?: 'mainnet' | 'testnet';
 };
 
 type ChainConfig = { name: string; id: string; rpcUrl: string; apiUrl: string; explorerUrl: string };
@@ -144,7 +145,11 @@ function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig): Vau
     return [ZIGCHAIN_USDC];
   }
 
-  const isSepolia = evmConf.chainId === 11155111 || evmConf.rpcUrl.includes('sepolia');
+  const isSepolia = targetVault.evmNetwork === 'testnet'
+    ? true
+    : targetVault.evmNetwork === 'mainnet'
+    ? false
+    : (evmConf.chainId === 11155111 || evmConf.rpcUrl.includes('sepolia'));
   const list: VaultAsset[] = [];
 
   // If vault has an auto-detected asset, prioritize it at the top
@@ -212,6 +217,37 @@ const defaultEvmConfig: EvmConfig = {
   nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
 };
 
+const defaultEvmTestnetConfig: EvmConfig = {
+  rpcUrl: 'https://eth-sepolia.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
+  chainId: 11155111,
+  explorerUrl: 'https://sepolia.etherscan.io',
+  nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
+};
+
+const defaultEvmMainnetConfig: EvmConfig = {
+  rpcUrl: 'https://eth-mainnet.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
+  chainId: 1,
+  explorerUrl: 'https://etherscan.io',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+};
+
+function getVaultEvmConfig(
+  targetVault?: Vault | null,
+  fallbackEvm: EvmConfig = defaultEvmConfig,
+  testnetEvm: EvmConfig = defaultEvmTestnetConfig,
+  mainnetEvm: EvmConfig = defaultEvmMainnetConfig
+): EvmConfig {
+  if (!targetVault) return fallbackEvm;
+  if (targetVault.evmNetwork === 'testnet') return testnetEvm;
+  if (targetVault.evmNetwork === 'mainnet') return mainnetEvm;
+
+  const addr = targetVault.address?.toLowerCase() || '';
+  if (addr === '0xe1908800dbefe8a571a8580d9cc546091e6fdf9a') return testnetEvm;
+  if (addr === '0x6fe78b942c566fe2b8d0881cf3577c1b1511f204' || addr === '0x1754fcd1f0ebb306286dd16f00abcf46731a92fc') return mainnetEvm;
+
+  return fallbackEvm;
+}
+
 
 const defaultTokenConfig: TokenConfig = { symbol: 'ZIG', denom: 'uzig', decimals: 6 };
 
@@ -276,6 +312,7 @@ const defaultVaults: Vault[] = [
     name: 'Nawa Finance',
     address: '0x6FE78B942C566fE2b8D0881cf3577C1B1511F204',
     chainType: 'erc',
+    evmNetwork: 'mainnet',
     accent: 'green',
     tvl: '$24,850,000',
     apy: '12.40%',
@@ -293,6 +330,7 @@ const defaultVaults: Vault[] = [
     name: 'Valdora',
     address: '0x1754fCD1F0EBb306286dd16F00abCf46731a92FC',
     chainType: 'erc',
+    evmNetwork: 'mainnet',
     accent: 'cyan',
     tvl: '$18,320,000',
     apy: '11.85%',
@@ -310,6 +348,7 @@ const defaultVaults: Vault[] = [
     name: 'Sepolia Testnet Vault',
     address: '0xe1908800dBEFE8a571A8580D9Cc546091e6FDF9a',
     chainType: 'erc',
+    evmNetwork: 'testnet',
     accent: 'orange',
     tvl: '$5,400,000',
     apy: '14.20%',
@@ -513,6 +552,8 @@ export default function Home() {
   const [vaults, setVaults] = useState<Vault[]>(defaultVaults);
   const [chainConfig, setChainConfig] = useState<ChainConfig>(defaultChainConfig);
   const [evmConfig, setEvmConfig] = useState<EvmConfig>(defaultEvmConfig);
+  const [evmTestnetConfig, setEvmTestnetConfig] = useState<EvmConfig>(defaultEvmTestnetConfig);
+  const [evmMainnetConfig, setEvmMainnetConfig] = useState<EvmConfig>(defaultEvmMainnetConfig);
   const [transferToken, setTransferToken] = useState<TokenConfig>(defaultTokenConfig);
   const [nativeToken, setNativeToken] = useState<TokenConfig>(defaultTokenConfig);
   const [ibcTransfer, setIbcTransfer] = useState<IbcTransferConfig>(defaultIbcTransferConfig);
@@ -544,6 +585,7 @@ export default function Home() {
   const [sidebarFilter, setSidebarFilter] = useState<'all' | 'zigchain' | 'erc'>('all');
   const [newVaultName, setNewVaultName] = useState('');
   const [newVaultChain, setNewVaultChain] = useState<ChainType>('zigchain');
+  const [newVaultEvmNetwork, setNewVaultEvmNetwork] = useState<'testnet' | 'mainnet'>('testnet');
   const [newVaultAddress, setNewVaultAddress] = useState('');
   const [newVaultSummary, setNewVaultSummary] = useState('');
   const [newVaultSymbol, setNewVaultSymbol] = useState('');
@@ -565,6 +607,8 @@ export default function Home() {
   const vaultsRef = useRef<Vault[]>(defaultVaults);
   const chainConfigRef = useRef<ChainConfig>(defaultChainConfig);
   const evmConfigRef = useRef<EvmConfig>(defaultEvmConfig);
+  const evmTestnetConfigRef = useRef<EvmConfig>(defaultEvmTestnetConfig);
+  const evmMainnetConfigRef = useRef<EvmConfig>(defaultEvmMainnetConfig);
   const transferTokenRef = useRef<TokenConfig>(defaultTokenConfig);
   const nativeTokenRef = useRef<TokenConfig>(defaultTokenConfig);
   const ibcTransferRef = useRef<IbcTransferConfig>(defaultIbcTransferConfig);
@@ -577,10 +621,11 @@ export default function Home() {
   const automation = automations[selectedVault] ?? { mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null };
   const walletSession = walletSessions[selectedVault] ?? { mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false };
 
-  const activeVaultAsset = getActiveVaultAsset(vault, evmConfig);
+  const currentVaultEvmConfig = getVaultEvmConfig(vault, evmConfig, evmTestnetConfig, evmMainnetConfig);
+  const activeVaultAsset = getActiveVaultAsset(vault, currentVaultEvmConfig);
   const currentTokenSymbol = activeVaultAsset.symbol;
   const currentTokenDecimals = activeVaultAsset.decimals;
-  const availableVaultAssets = getAvailableAssetsForVault(vault, evmConfig);
+  const availableVaultAssets = getAvailableAssetsForVault(vault, currentVaultEvmConfig);
 
   function handleSelectVaultAsset(vaultIndex: number, asset: VaultAsset) {
     setVaults((cur) =>
@@ -621,7 +666,8 @@ export default function Home() {
     setDetectingAsset(true);
     const timer = setTimeout(async () => {
       try {
-        const detected = await detectVaultAsset(newVaultAddress.trim(), evmConfigRef.current);
+        const targetEvm = newVaultEvmNetwork === 'mainnet' ? evmMainnetConfigRef.current : evmTestnetConfigRef.current;
+        const detected = await detectVaultAsset(newVaultAddress.trim(), targetEvm);
         if (active) {
           setDetectedAddVaultAsset(detected);
           if (detected) {
@@ -640,7 +686,7 @@ export default function Home() {
       active = false;
       clearTimeout(timer);
     };
-  }, [newVaultAddress, newVaultChain]);
+  }, [newVaultAddress, newVaultChain, newVaultEvmNetwork]);
 
   // Dynamically auto-detect accepted token for currently selected vault if it doesn't have detectedAsset yet
   useEffect(() => {
@@ -650,7 +696,8 @@ export default function Home() {
     let active = true;
     void (async () => {
       try {
-        const detected = await detectVaultAsset(vault.address, evmConfigRef.current);
+        const vaultEvm = getVaultEvmConfig(vault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+        const detected = await detectVaultAsset(vault.address, vaultEvm);
         if (active && detected) {
           setVaults((cur) =>
             cur.map((v, i) =>
@@ -672,7 +719,7 @@ export default function Home() {
     return () => {
       active = false;
     };
-  }, [selectedVault, vault?.address, vault?.chainType, vault?.detectedAsset]);
+  }, [selectedVault, vault?.address, vault?.chainType, vault?.detectedAsset, vault?.evmNetwork]);
 
   const selectedHistory = useMemo(() => history.filter((entry) => entry.vaultIndex === selectedVault && (historyFilter === 'All' || entry.status === historyFilter)), [history, historyFilter, selectedVault]);
   const successfulHistory = history.filter((entry) => entry.vaultIndex === selectedVault && entry.status === 'Success');
@@ -757,14 +804,18 @@ export default function Home() {
       const data = await response.json() as {
         chain?: ChainConfig;
         evm?: EvmConfig;
+        evmTestnet?: EvmConfig;
+        evmMainnet?: EvmConfig;
         nativeToken?: TokenConfig;
         token?: TokenConfig;
         ibcTransfer?: IbcTransferConfig;
-        vaults: Array<{ name: string; address: string | null; chainType?: ChainType }>;
+        vaults: Array<{ name: string; address: string | null; chainType?: ChainType; evmNetwork?: 'mainnet' | 'testnet' }>;
       };
 
       const nextChainConfig = data.chain ?? defaultChainConfig;
       const nextEvmConfig = data.evm ?? defaultEvmConfig;
+      const nextEvmTestnetConfig = data.evmTestnet ?? defaultEvmTestnetConfig;
+      const nextEvmMainnetConfig = data.evmMainnet ?? defaultEvmMainnetConfig;
       const nextTransferToken = data.token ?? defaultTokenConfig;
       const nextNativeToken = data.nativeToken ?? defaultTokenConfig;
       const nextIbcTransfer = data.ibcTransfer ?? defaultIbcTransferConfig;
@@ -775,6 +826,7 @@ export default function Home() {
         name: data.vaults?.[index]?.name ?? item.name,
         address: data.vaults?.[index]?.address ?? item.address,
         chainType: (data.vaults?.[index]?.chainType ?? item.chainType) as ChainType,
+        evmNetwork: data.vaults?.[index]?.evmNetwork ?? item.evmNetwork,
       }));
 
       // Load custom vaults from backend and local storage
@@ -782,14 +834,15 @@ export default function Home() {
       try {
         const customRes = await apiRequest('/api/vaults/custom');
         if (customRes.ok) {
-          const customData = await customRes.json() as { vaults: Array<{ id: string; name: string; address: string; chainType: ChainType; tokenSymbol?: string; tokenDecimals?: number; summary?: string }> };
+          const customData = await customRes.json() as { vaults: Array<{ id: string; name: string; address: string; chainType: ChainType; evmNetwork?: 'mainnet' | 'testnet'; tokenSymbol?: string; tokenDecimals?: number; summary?: string }> };
           customVaults = customData.vaults.map((cv, i) => ({
             id: cv.id,
             pair: cv.chainType === 'erc' ? `ERC ${i + 3}` : `CUSTOM ${i + 1}`,
             name: cv.name,
             address: cv.address,
             chainType: cv.chainType,
-            accent: cv.chainType === 'erc' ? 'cyan' : 'blue',
+            evmNetwork: cv.evmNetwork,
+            accent: cv.chainType === 'erc' ? (cv.evmNetwork === 'mainnet' ? 'green' : 'cyan') : 'blue',
             tvl: '$0',
             apy: '—',
             type: 'Custom Vault',
@@ -823,6 +876,8 @@ export default function Home() {
 
       chainConfigRef.current = nextChainConfig;
       evmConfigRef.current = nextEvmConfig;
+      evmTestnetConfigRef.current = nextEvmTestnetConfig;
+      evmMainnetConfigRef.current = nextEvmMainnetConfig;
       transferTokenRef.current = nextTransferToken;
       nativeTokenRef.current = nextNativeToken;
       ibcTransferRef.current = nextIbcTransfer;
@@ -830,6 +885,8 @@ export default function Home() {
 
       setChainConfig(nextChainConfig);
       setEvmConfig(nextEvmConfig);
+      setEvmTestnetConfig(nextEvmTestnetConfig);
+      setEvmMainnetConfig(nextEvmMainnetConfig);
       setTransferToken(nextTransferToken);
       setNativeToken(nextNativeToken);
       setIbcTransfer(nextIbcTransfer);
@@ -855,8 +912,9 @@ export default function Home() {
 
     if (currentVault.chainType === 'erc') {
       try {
-        const provider = new ethers.JsonRpcProvider(evmConfigRef.current.rpcUrl);
-        const activeAsset = getActiveVaultAsset(currentVault, evmConfigRef.current);
+        const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+        const provider = new ethers.JsonRpcProvider(vaultEvm.rpcUrl);
+        const activeAsset = getActiveVaultAsset(currentVault, vaultEvm);
 
         let gasWei = 0n;
         try {
@@ -948,7 +1006,8 @@ export default function Home() {
       if (!currentVault) throw new Error('Vault not selected.');
 
       if (currentVault.chainType === 'erc') {
-        const provider = new ethers.JsonRpcProvider(evmConfigRef.current.rpcUrl);
+        const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+        const provider = new ethers.JsonRpcProvider(vaultEvm.rpcUrl);
         let wallet: ethers.Wallet;
         if (secret.includes(' ')) {
           const hd = ethers.HDNodeWallet.fromPhrase(secret);
@@ -1127,7 +1186,8 @@ export default function Home() {
 
   function getAmountRange(index: number) {
     const currentVault = vaults[index];
-    const activeAsset = currentVault ? getActiveVaultAsset(currentVault, evmConfig) : null;
+    const vaultEvm = getVaultEvmConfig(currentVault, evmConfig, evmTestnetConfig, evmMainnetConfig);
+    const activeAsset = currentVault ? getActiveVaultAsset(currentVault, vaultEvm) : null;
     const decimals = activeAsset?.decimals ?? (currentVault?.tokenDecimals ?? (currentVault?.chainType === 'erc' ? 18 : transferToken.decimals));
     const settings = automations[index];
     const minimum = parseTokenAmount(settings.minimum, decimals);
@@ -1141,7 +1201,8 @@ export default function Home() {
     const target = vaults[index];
     const session = walletSessions[index];
     if (!target) return false;
-    const activeAsset = getActiveVaultAsset(target, evmConfig);
+    const vaultEvm = getVaultEvmConfig(target, evmConfig, evmTestnetConfig, evmMainnetConfig);
+    const activeAsset = getActiveVaultAsset(target, vaultEvm);
     const decimals = activeAsset.decimals;
     return Boolean(session?.hasSigner && target?.address && target.address !== 'Not configured' && hasValidRange(automations[index], decimals));
   }
@@ -1214,7 +1275,8 @@ export default function Home() {
       if (target.chainType === 'erc') {
         if (universalSigner.type !== 'evm') throw new Error('Signer is not an EVM wallet.');
 
-        const activeAsset = getActiveVaultAsset(target, evmConfigRef.current);
+        const vaultEvm = getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+        const activeAsset = getActiveVaultAsset(target, vaultEvm);
         const symbol = activeAsset.symbol;
         const decimals = activeAsset.decimals;
 
@@ -1336,7 +1398,8 @@ export default function Home() {
         return true;
       }
     } catch (error) {
-      const activeAsset = target ? getActiveVaultAsset(target, evmConfigRef.current) : null;
+      const vaultEvm = target ? getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current) : undefined;
+      const activeAsset = target && vaultEvm ? getActiveVaultAsset(target, vaultEvm) : null;
       const symbol = activeAsset?.symbol ?? (target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol));
       const message = formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol);
       if (generation === (sessionGenerationRef.current[index] ?? 0)) {
@@ -1465,7 +1528,15 @@ export default function Home() {
         const createRes = await apiRequest('/api/vaults/custom', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, address, chainType: newVaultChain, tokenSymbol: symbol, tokenDecimals: decimals, summary }),
+          body: JSON.stringify({
+            name,
+            address,
+            chainType: newVaultChain,
+            evmNetwork: newVaultChain === 'erc' ? newVaultEvmNetwork : undefined,
+            tokenSymbol: symbol,
+            tokenDecimals: decimals,
+            summary,
+          }),
         });
         if (createRes.ok) {
           const createData = await createRes.json() as { vault?: { id: string } };
@@ -1481,7 +1552,8 @@ export default function Home() {
         name,
         address,
         chainType: newVaultChain,
-        accent: newVaultChain === 'erc' ? 'cyan' : 'blue',
+        evmNetwork: newVaultChain === 'erc' ? newVaultEvmNetwork : undefined,
+        accent: newVaultChain === 'erc' ? (newVaultEvmNetwork === 'mainnet' ? 'green' : 'cyan') : 'blue',
         tvl: '$0',
         apy: '—',
         type: 'Custom Vault',
@@ -1520,6 +1592,7 @@ export default function Home() {
       setNewVaultSummary('');
       setNewVaultSymbol('');
       setNewVaultDecimals('');
+      setNewVaultEvmNetwork('testnet');
       setDetectedAddVaultAsset(null);
     } catch (err) {
       setAddVaultError(err instanceof Error ? err.message : 'Failed to create vault.');
@@ -1758,7 +1831,9 @@ export default function Home() {
                 >
                   <div className="sidebar-vault-top">
                     <span className={`chain-pill ${item.chainType}`}>
-                      {item.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'}
+                      {item.chainType === 'erc'
+                        ? (item.evmNetwork === 'mainnet' ? 'MAINNET' : 'SEPOLIA')
+                        : 'ZIGCHAIN'}
                     </span>
                     <span className="sidebar-vault-pair">{item.pair}</span>
                     {walletSessions[index]?.source && (
@@ -1836,7 +1911,11 @@ export default function Home() {
           onClick={() => setSidebarOpen(true)}
           title="Click to browse all vaults"
         >
-          <span className={`chain-pill ${vault.chainType}`}>{vault.chainType === 'erc' ? 'ERC' : 'ZIG'}</span>
+          <span className={`chain-pill ${vault.chainType}`}>
+            {vault.chainType === 'erc'
+              ? (currentVaultEvmConfig.chainId === 1 ? 'MAINNET' : 'SEPOLIA')
+              : 'ZIG'}
+          </span>
           <span className="active-vault-name">{vault.name}</span>
           {walletSession.source && <span className="connected-mini" title="Signer unlocked">●</span>}
           <span className={`pair-dot ${vault.accent}`} />
@@ -1894,6 +1973,30 @@ export default function Home() {
                   </button>
                 </div>
               </div>
+
+              {newVaultChain === 'erc' && (
+                <div className="chain-selector-box" style={{ marginTop: '14px' }}>
+                  <span className="form-label">CHOOSE EVM NETWORK</span>
+                  <div className="chain-toggle-group">
+                    <button
+                      type="button"
+                      className={`chain-select-btn ${newVaultEvmNetwork === 'testnet' ? 'active' : ''}`}
+                      onClick={() => setNewVaultEvmNetwork('testnet')}
+                    >
+                      <strong>Sepolia Testnet</strong>
+                      <small>Alchemy Sepolia RPC · Chain ID 11155111</small>
+                    </button>
+                    <button
+                      type="button"
+                      className={`chain-select-btn ${newVaultEvmNetwork === 'mainnet' ? 'active' : ''}`}
+                      onClick={() => setNewVaultEvmNetwork('mainnet')}
+                    >
+                      <strong>Ethereum Mainnet</strong>
+                      <small>Alchemy Mainnet RPC · Chain ID 1</small>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <div className="form-row">
                 <label>
@@ -2225,7 +2328,11 @@ export default function Home() {
             <div className="vault-nameplate">
               <span className={`vault-badge ${vault.accent}`}>{vault.pair}</span>
               <div>
-                <small>{vault.chainType === 'erc' ? 'ERC / EVM STRATEGY' : 'ZIGCHAIN STRATEGY'}</small>
+                <small>
+                  {vault.chainType === 'erc'
+                    ? (currentVaultEvmConfig.chainId === 1 ? 'ETHEREUM MAINNET (EVM)' : 'SEPOLIA TESTNET (EVM)')
+                    : 'ZIGCHAIN STRATEGY'}
+                </small>
                 <strong>{vault.name}</strong>
               </div>
               <span className={vault.address && vault.address !== 'Not configured' ? 'configured' : 'not-configured'}>
@@ -2277,7 +2384,7 @@ export default function Home() {
                 <strong>{vault.address && vault.address !== 'Not configured' ? `${vault.chainType === 'erc' ? 'ERC / EVM' : 'COSMOS'} TRANSFER READY` : 'VAULT_NOT_CONFIGURED'}</strong>
                 <small>
                   {vault.chainType === 'erc'
-                    ? `Transfers use EVM RPC (${evmConfig.rpcUrl}) with direct private key execution.`
+                    ? `Transfers execute on ${currentVaultEvmConfig.chainId === 1 ? 'Ethereum Mainnet' : 'Sepolia Testnet'} (${currentVaultEvmConfig.rpcUrl}) with direct private key execution.`
                     : `Transfers execute on ${chainConfig.name} with standard Cosmos signing.`}
                 </small>
               </div>
@@ -2504,7 +2611,24 @@ export default function Home() {
                 <strong>{formatBaseUnits(entry.amountBaseUnits, currentTokenDecimals)} {currentTokenSymbol}</strong>
                 <span className={`history-status ${entry.status.toLowerCase()}`}>{entry.status}</span>
                 <div className="tx-cell">
-                  <code>{entry.hash ? `${entry.hash.slice(0, 10)}…${entry.hash.slice(-6)}` : entry.error ? entry.error.slice(0, 34) : 'Broadcasting…'}</code>
+                  {entry.hash ? (
+                    <a
+                      href={
+                        vault.chainType === 'erc'
+                          ? `${currentVaultEvmConfig.explorerUrl}/tx/${entry.hash}`
+                          : `${chainConfig.explorerUrl}/tx/${entry.hash}`
+                      }
+                      target="_blank"
+                      rel="noreferrer"
+                      className="tx-hash-link"
+                      title="View transaction on block explorer"
+                    >
+                      <code>{`${entry.hash.slice(0, 10)}…${entry.hash.slice(-6)}`}</code>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                    </a>
+                  ) : (
+                    <code>{entry.error ? entry.error.slice(0, 34) : 'Broadcasting…'}</code>
+                  )}
                   {entry.hash && (
                     <button
                       className={copiedHash === entry.hash ? 'copied' : ''}

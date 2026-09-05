@@ -3257,4 +3257,35 @@ button {
   font-size: 11px;
 }
 
+.tx-hash-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-decoration: none;
+  color: #38bdf8;
+  transition: color 0.15s ease;
+}
+
+.tx-hash-link:hover {
+  color: #7dd3fc;
+  text-decoration: underline;
+}
+
+.tx-hash-link code {
+  color: inherit;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.tx-hash-link svg {
+  opacity: 0.7;
+  flex-shrink: 0;
+  transition: opacity 0.15s ease;
+}
+
+.tx-hash-link:hover svg {
+  opacity: 1;
+}
+
 
