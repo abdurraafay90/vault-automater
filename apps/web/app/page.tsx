@@ -484,6 +484,7 @@ function randomAmount(minimum: bigint, maximum: bigint) {
 function formatCountdown(nextAt: number | null, now: number) {
   if (!nextAt) return '—';
   const seconds = Math.max(0, Math.ceil((nextAt - now) / 1000));
+  if (seconds === 0) return 'Due now';
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
@@ -875,23 +876,21 @@ export default function Home() {
   }, [addVaultOpen, sidebarOpen, adminOpen, deleteModalOpen]);
 
   function patchAutomation(index: number, patch: Partial<Automation>) {
-    setAutomations((cur) => {
-      const targetLen = Math.max(cur.length, automationsRef.current.length, index + 1);
-      const expanded = Array.from({ length: targetLen }, (_, i) => cur[i] ?? automationsRef.current[i] ?? { mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null });
-      const next = expanded.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
-      automationsRef.current = next;
-      return next;
-    });
+    const cur = automationsRef.current;
+    const targetLen = Math.max(cur.length, index + 1);
+    const expanded = Array.from({ length: targetLen }, (_, i) => cur[i] ?? { mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null });
+    const next = expanded.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
+    automationsRef.current = next;
+    setAutomations(next);
   }
 
   function patchWalletSession(index: number, patch: Partial<WalletSession>) {
-    setWalletSessions((cur) => {
-      const targetLen = Math.max(cur.length, walletSessionsRef.current.length, index + 1);
-      const expanded = Array.from({ length: targetLen }, (_, i) => cur[i] ?? walletSessionsRef.current[i] ?? { mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false });
-      const next = expanded.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
-      walletSessionsRef.current = next;
-      return next;
-    });
+    const cur = walletSessionsRef.current;
+    const targetLen = Math.max(cur.length, index + 1);
+    const expanded = Array.from({ length: targetLen }, (_, i) => cur[i] ?? { mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false });
+    const next = expanded.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
+    walletSessionsRef.current = next;
+    setWalletSessions(next);
   }
 
   function clearVaultTimer(index: number) {
@@ -1356,30 +1355,35 @@ export default function Home() {
   }
 
   function getAmountRange(index: number) {
-    const currentVault = vaults[index];
-    const vaultEvm = getVaultEvmConfig(currentVault, evmConfig, evmTestnetConfig, evmMainnetConfig);
-    const activeAsset = currentVault ? getActiveVaultAsset(currentVault, vaultEvm, walletDiscoveredAssetsRef.current) : null;
-    const decimals = activeAsset?.decimals ?? (currentVault?.tokenDecimals ?? (currentVault?.chainType === 'erc' ? 18 : transferToken.decimals));
-    const settings = automations[index];
+    const currentVault = vaultsRef.current[index] ?? vaults[index];
+    if (!currentVault) throw new Error('Selected vault is unavailable.');
+    const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+    const activeAsset = getActiveVaultAsset(currentVault, vaultEvm, walletDiscoveredAssetsRef.current);
+    const decimals = activeAsset?.decimals ?? (currentVault.tokenDecimals ?? (currentVault.chainType === 'erc' ? 18 : transferTokenRef.current.decimals));
+    const settings = automationsRef.current[index] ?? automations[index];
+    if (!settings) throw new Error('Automation settings not initialized for this vault.');
     const minimum = parseTokenAmount(settings.minimum, decimals);
     const maximum = settings.mode === 'once' ? minimum : settings.maximum.trim() ? parseTokenAmount(settings.maximum, decimals) : minimum;
     if (maximum < minimum) throw new Error('Maximum amount must be greater than or equal to the minimum.');
-    if (settings.mode === 'automation' && (!Number.isInteger(settings.interval) || settings.interval < 5)) throw new Error('Frequency must be at least 5 seconds.');
+    const intervalSec = (settings.interval && settings.interval >= 5) ? settings.interval : 30;
+    if (settings.mode === 'automation' && intervalSec < 5) throw new Error('Frequency must be at least 5 seconds.');
     return { minimum, maximum };
   }
 
   function canSend(index: number) {
-    const target = vaults[index];
-    const session = walletSessions[index];
+    const target = vaultsRef.current[index] ?? vaults[index];
+    const session = walletSessionsRef.current[index] ?? walletSessions[index];
     if (!target) return false;
-    const vaultEvm = getVaultEvmConfig(target, evmConfig, evmTestnetConfig, evmMainnetConfig);
+    const vaultEvm = getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
     const activeAsset = getActiveVaultAsset(target, vaultEvm, walletDiscoveredAssetsRef.current);
     const decimals = activeAsset.decimals;
-    return Boolean(session?.hasSigner && target?.address && target.address !== 'Not configured' && hasValidRange(automations[index], decimals));
+    const settings = automationsRef.current[index] ?? automations[index];
+    return Boolean(session?.hasSigner && target?.address && target.address !== 'Not configured' && settings && hasValidRange(settings, decimals));
   }
 
   function canAutomate(index: number) {
-    return walletSessions[index]?.source === 'private' && canSend(index);
+    const session = walletSessionsRef.current[index] ?? walletSessions[index];
+    return session?.source === 'private' && canSend(index);
   }
 
   function buildOrbiterMemo(settings: IbcTransferConfig['orbiter']) {
@@ -1593,15 +1597,21 @@ export default function Home() {
   function scheduleNextCycle(index: number) {
     clearVaultTimer(index);
     const target = automationsRef.current[index];
-    if (target.status !== 'running' || target.mode !== 'automation') return;
-    const intervalMs = target.interval * 1000;
+    if (!target || target.status !== 'running' || target.mode !== 'automation') return;
+    const intervalSec = (target.interval && target.interval >= 5) ? target.interval : 30;
+    const intervalMs = intervalSec * 1000;
     const nextAt = unixNow() + intervalMs;
     patchAutomation(index, { nextAt });
-    timersRef.current[index] = setTimeout(() => void runAutomationCycle(index), intervalMs);
+    timersRef.current[index] = setTimeout(() => {
+      timersRef.current[index] = null;
+      void runAutomationCycle(index);
+    }, intervalMs);
   }
 
-  async function runAutomationCycle(index: number) {
-    if (automationsRef.current[index]?.status !== 'running') return;
+  async function runAutomationCycle(index: number, force = false) {
+    const currentAuto = automationsRef.current[index];
+    if (!currentAuto || (!force && currentAuto.status !== 'running')) return;
+    if (currentAuto.mode !== 'automation') return;
     try {
       const { minimum, maximum } = getAmountRange(index);
       const amount = randomAmount(minimum, maximum);
@@ -1614,7 +1624,7 @@ export default function Home() {
       scheduleNextCycle(index);
     } catch (error) {
       pauseAutomation(index);
-      const target = vaultsRef.current[index];
+      const target = vaultsRef.current[index] ?? vaults[index];
       const symbol = target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
       setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
     }
@@ -1622,17 +1632,21 @@ export default function Home() {
 
   function startAutomation(index: number) {
     try {
-      if (automationsRef.current[index]?.mode !== 'automation') throw new Error('Select Automation mode first.');
+      const current = automationsRef.current[index] ?? automations[index];
+      if (current?.mode !== 'automation') throw new Error('Select Automation mode first.');
       getAmountRange(index);
       if (!signersRef.current[index]) throw new Error('Unlock the private-key session first.');
-      const target = vaultsRef.current[index];
+      const target = vaultsRef.current[index] ?? vaults[index];
       if (!target?.address || target.address === 'Not configured') throw new Error('This vault address is not configured.');
+
       clearVaultTimer(index);
-      patchAutomation(index, { status: 'running', nextAt: unixNow() });
+      const intervalSec = (current.interval && current.interval >= 5) ? current.interval : 30;
+      const nextAt = unixNow() + (intervalSec * 1000);
+      patchAutomation(index, { status: 'running', nextAt });
       setTransferStatus(null);
-      void runAutomationCycle(index);
+      void runAutomationCycle(index, true);
     } catch (error) {
-      const target = vaultsRef.current[index];
+      const target = vaultsRef.current[index] ?? vaults[index];
       const symbol = target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
       setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
     }
@@ -1643,6 +1657,20 @@ export default function Home() {
       if (item.mode === 'automation' && canAutomate(index)) startAutomation(index);
     });
   }
+
+  // Automation watchdog: Ensures running schedules never stall at 0:00 or miss cycles
+  useEffect(() => {
+    const curNow = unixNow();
+    automationsRef.current.forEach((auto, idx) => {
+      if (auto.mode === 'automation' && auto.status === 'running') {
+        if (auto.nextAt && curNow >= auto.nextAt && !sendingVaults.includes(idx)) {
+          if (!timersRef.current[idx]) {
+            void runAutomationCycle(idx, true);
+          }
+        }
+      }
+    });
+  }, [now, sendingVaults]);
 
   function sendManualTransfer() {
     setTransferStatus(null);
@@ -2765,7 +2793,7 @@ export default function Home() {
             </div>
             <div>
               <small>NEXT EXECUTION</small>
-              <strong>{automation.mode === 'once' ? 'Not scheduled' : automation.status === 'running' ? formatCountdown(automation.nextAt, now) : '—'}</strong>
+              <strong>{automation.mode === 'once' ? 'Not scheduled' : sendingVaults.includes(selectedVault) ? 'Executing now…' : automation.status === 'running' ? formatCountdown(automation.nextAt, now) : '—'}</strong>
             </div>
             <div className="strategy-actions">
               {automation.mode === 'once' ? (
