@@ -84,7 +84,7 @@ const defaultVaults: Vault[] = [
   { pair: 'PAIR 3', name: 'Core Income', address: 'Not configured', chainType: 'zigchain', accent: 'orange', tvl: '$11,329,834', apy: '8.03%', type: 'Core Income', risk: 'Low', summary: 'Lower-volatility private credit strategy on ZIGChain' },
   { pair: 'ERC 1', name: 'Nawa Finance', address: '0x6FE78B942C566fE2b8D0881cf3577C1B1511F204', chainType: 'erc', accent: 'green', tvl: '$24,850,000', apy: '12.40%', type: 'Shariah Ethical Yield', risk: 'Low', summary: 'Shariah-compliant ethical asset-backed yield vault', tokenSymbol: 'ETH', tokenDecimals: 18 },
   { pair: 'ERC 2', name: 'Valdora', address: '0x1754fCD1F0EBb306286dd16F00abCf46731a92FC', chainType: 'erc', accent: 'cyan', tvl: '$18,320,000', apy: '11.85%', type: 'Liquid Staking & Yield', risk: 'Medium', summary: 'Composable institutional liquid staking & yield vault', tokenSymbol: 'ETH', tokenDecimals: 18 },
-  { pair: 'ERC 3', name: 'Sepolia Testnet Vault', address: '0x0AD79274Bd5Db550Fce6E1D4b86042fa715d1b3b', chainType: 'erc', accent: 'orange', tvl: '$5,400,000', apy: '14.20%', type: 'Testnet Yield Strategy', risk: 'Low', summary: 'Sepolia EVM testnet vault strategy for testing and automation', tokenSymbol: 'ETH', tokenDecimals: 18 },
+  { pair: 'ERC 3', name: 'Sepolia Testnet Vault', address: '0xe1908800dBEFE8a571A8580D9Cc546091e6FDF9a', chainType: 'erc', accent: 'orange', tvl: '$5,400,000', apy: '14.20%', type: 'Testnet Yield Strategy', risk: 'Low', summary: 'Sepolia EVM testnet vault strategy for testing and automation', tokenSymbol: 'ETH', tokenDecimals: 18 },
 ];
 
 const intervals = [

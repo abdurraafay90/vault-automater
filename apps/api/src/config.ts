@@ -52,7 +52,7 @@ const environmentSchema = z.object({
   VAULT_5_ADDRESS: z.string().trim().default('0x1754fCD1F0EBb306286dd16F00abCf46731a92FC'),
   VAULT_5_CHAIN_TYPE: z.enum(['zigchain', 'erc']).default('erc'),
   VAULT_6_NAME: z.string().min(1).default('Sepolia Testnet Vault'),
-  VAULT_6_ADDRESS: z.string().trim().default('0x0AD79274Bd5Db550Fce6E1D4b86042fa715d1b3b'),
+  VAULT_6_ADDRESS: z.string().trim().default('0xe1908800dBEFE8a571A8580D9Cc546091e6FDF9a'),
   VAULT_6_CHAIN_TYPE: z.enum(['zigchain', 'erc']).default('erc'),
   BACKEND_SIGNER_ENABLED: z.stringbool().default(false),
   ADMIN_EMAIL: z.email(),
