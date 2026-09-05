@@ -28,6 +28,8 @@ COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
 COPY apps/web apps/web
 
+RUN npm run build -w @vaultflow/web
+
 WORKDIR /repo/apps/web
 EXPOSE 4560
 CMD ["npm", "run", "start"]

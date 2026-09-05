@@ -41,6 +41,8 @@
   "type": "module",
   "optionalDependencies": {
     "@rolldown/binding-linux-x64-musl": "^1.0.1",
-    "@rolldown/binding-win32-x64-msvc": "^1.0.1"
+    "@rolldown/binding-win32-x64-msvc": "^1.0.1",
+    "@tailwindcss/oxide-linux-x64-musl": "^4.2.1",
+    "lightningcss-linux-x64-musl": "^1.33.0"
   }
 }
