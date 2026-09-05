@@ -141,7 +141,7 @@ async function detectVaultAsset(vaultAddress: string, evmConf?: EvmConfig): Prom
 
 function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig): VaultAsset[] {
   if (targetVault.chainType === 'zigchain') {
-    return [ZIGCHAIN_USDC, ZIGCHAIN_ZIG];
+    return [ZIGCHAIN_USDC];
   }
 
   const isSepolia = evmConf.chainId === 11155111 || evmConf.rpcUrl.includes('sepolia');
@@ -153,8 +153,8 @@ function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig): Vau
   }
 
   const standardTokens = isSepolia
-    ? [SEPOLIA_USDC, SEPOLIA_USDT, SEPOLIA_ETH]
-    : [MAINNET_USDT, MAINNET_USDC, NATIVE_ETH];
+    ? [SEPOLIA_USDC, SEPOLIA_USDT]
+    : [MAINNET_USDT, MAINNET_USDC];
 
   for (const item of standardTokens) {
     if (!list.some((existing) => existing.symbol === item.symbol)) {
@@ -315,10 +315,12 @@ const defaultVaults: Vault[] = [
     apy: '14.20%',
     type: 'Testnet Yield Strategy',
     risk: 'Low',
-    summary: 'Sepolia EVM testnet vault strategy for testing and automation',
-    tokenSymbol: 'ETH',
-    tokenDecimals: 18,
-    selectedAssetSymbol: 'ETH',
+    summary: 'Sepolia EVM testnet vault strategy for testing and automation (USDC)',
+    tokenSymbol: 'USDC',
+    tokenDecimals: 6,
+    tokenAddress: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
+    detectedAsset: SEPOLIA_USDC,
+    selectedAssetSymbol: 'USDC',
   },
 ];
 
@@ -1922,7 +1924,7 @@ export default function Home() {
                     type="text"
                     value={newVaultSymbol}
                     onChange={(e) => setNewVaultSymbol(e.target.value)}
-                    placeholder={newVaultChain === 'erc' ? 'ETH' : 'ZIG'}
+                    placeholder="USDC"
                   />
                 </label>
                 <label>
@@ -1931,7 +1933,7 @@ export default function Home() {
                     type="number"
                     value={newVaultDecimals}
                     onChange={(e) => setNewVaultDecimals(e.target.value)}
-                    placeholder={newVaultChain === 'erc' ? '18' : '6'}
+                    placeholder="6"
                   />
                 </label>
                 <label>
