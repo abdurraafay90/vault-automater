@@ -137,6 +137,7 @@ app.get('/api/config/public', async () => ({
     { id: 'vault-3', name: config.VAULT_3_NAME, address: config.VAULT_3_IBC_RECEIVER || config.VAULT_3_ADDRESS || null, chainType: 'zigchain' },
     { id: 'vault-4', name: config.VAULT_4_NAME, address: config.VAULT_4_ADDRESS, chainType: config.VAULT_4_CHAIN_TYPE },
     { id: 'vault-5', name: config.VAULT_5_NAME, address: config.VAULT_5_ADDRESS, chainType: config.VAULT_5_CHAIN_TYPE },
+    { id: 'vault-6', name: config.VAULT_6_NAME, address: config.VAULT_6_ADDRESS, chainType: config.VAULT_6_CHAIN_TYPE },
   ],
   blockchainStatus: vaultsConfigured ? 'READY' : 'VAULT_ADDRESSES_NOT_CONFIGURED',
   walletModes: ['private-key'],
