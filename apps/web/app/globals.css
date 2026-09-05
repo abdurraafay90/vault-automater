@@ -3051,3 +3051,210 @@ button {
   cursor: not-allowed;
 }
 
+/* Deposit Asset Selector & Dual Balance UI */
+.deposit-asset-section {
+  margin-top: 14px;
+  margin-bottom: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: rgba(13, 17, 24, 0.7);
+}
+
+.deposit-asset-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.deposit-asset-title {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.auto-detected-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  border-radius: 6px;
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.auto-detected-badge svg {
+  stroke: #10b981;
+}
+
+.asset-pill-group {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.asset-pill-btn {
+  flex: 1;
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 10px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: #0d121c;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.asset-pill-btn:hover:not(:disabled) {
+  background: #141b29;
+  border-color: var(--border-medium);
+  color: var(--text-primary);
+}
+
+.asset-pill-btn.active {
+  border-color: rgba(56, 189, 248, 0.7);
+  background: rgba(56, 189, 248, 0.1);
+  color: #fff;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.2);
+}
+
+.asset-pill-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pill-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 6px;
+}
+
+.pill-top strong {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.pill-detected-badge {
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.18);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  padding: 1px 5px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+}
+
+.asset-pill-btn small {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.asset-pill-btn.active small {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.gas-warning-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 10px 14px;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #fbbf24;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.gas-warning-notice svg {
+  flex-shrink: 0;
+  stroke: #fbbf24;
+}
+
+.gas-zero-warning {
+  color: #f87171 !important;
+}
+
+/* Live ERC-4626 Detection Banner in Add Vault Modal */
+.detecting-asset-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: -6px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.06);
+  color: #38bdf8;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.detected-asset-banner {
+  margin-top: -4px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(16, 185, 129, 0.5);
+  border-radius: 10px;
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.detected-asset-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #10b981;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+
+.detected-asset-badge svg {
+  stroke: #10b981;
+}
+
+.detected-asset-content strong {
+  display: block;
+  font-size: 14px;
+  color: #fff;
+  font-weight: 750;
+}
+
+.detected-asset-content p {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.detected-asset-content code {
+  font-family: var(--font-mono, monospace);
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.1);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+

@@ -7,6 +7,15 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 export type ChainType = 'zigchain' | 'erc';
 
+export type VaultAsset = {
+  symbol: string;
+  name: string;
+  decimals: number;
+  address?: string;
+  isNative?: boolean;
+  isDetected?: boolean;
+};
+
 export type Vault = {
   id?: string;
   pair: string;
@@ -21,6 +30,10 @@ export type Vault = {
   summary: string;
   tokenSymbol?: string;
   tokenDecimals?: number;
+  tokenAddress?: string;
+  detectedAsset?: VaultAsset | null;
+  selectedAssetSymbol?: string;
+  customAsset?: VaultAsset | null;
 };
 
 type ChainConfig = { name: string; id: string; rpcUrl: string; apiUrl: string; explorerUrl: string };
@@ -40,6 +53,125 @@ type IbcTransferConfig = {
     passthroughPayload: string;
   };
 };
+
+const ERC20_ABI = [
+  'function name() view returns (string)',
+  'function symbol() view returns (string)',
+  'function decimals() view returns (uint8)',
+  'function balanceOf(address owner) view returns (uint256)',
+  'function transfer(address to, uint256 amount) returns (bool)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+];
+
+// Presets for Ethereum Mainnet (Chain ID 1)
+const MAINNET_USDT: VaultAsset = { symbol: 'USDT', name: 'Tether USD', address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', decimals: 6, isDetected: true };
+const MAINNET_USDC: VaultAsset = { symbol: 'USDC', name: 'USD Coin', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 };
+const NATIVE_ETH: VaultAsset = { symbol: 'ETH', name: 'Native Ether', decimals: 18, isNative: true };
+
+// Presets for Sepolia Testnet (Chain ID 11155111)
+const SEPOLIA_USDC: VaultAsset = { symbol: 'USDC', name: 'Sepolia USDC', address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', decimals: 6 };
+const SEPOLIA_USDT: VaultAsset = { symbol: 'USDT', name: 'Sepolia USDT', address: '0xaa8E23Fb10790ea71844564301cD459E5bd33e42', decimals: 6 };
+const SEPOLIA_ETH: VaultAsset = { symbol: 'ETH', name: 'Sepolia Ether', decimals: 18, isNative: true };
+
+// Presets for ZIGChain
+const ZIGCHAIN_USDC: VaultAsset = { symbol: 'USDC', name: 'Noble USDC', decimals: 6, isDetected: true };
+const ZIGCHAIN_ZIG: VaultAsset = { symbol: 'ZIG', name: 'ZIG Native Gas', decimals: 6, isNative: true };
+
+async function detectVaultAsset(rpcUrl: string, vaultAddress: string): Promise<VaultAsset | null> {
+  if (!vaultAddress || !/^0x[0-9a-fA-F]{40}$/.test(vaultAddress)) return null;
+  try {
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const code = await provider.getCode(vaultAddress);
+    if (!code || code === '0x') return null;
+
+    let tokenAddress = '';
+    // Try ERC-4626 asset() -> 0x38d52e0f
+    try {
+      const assetRes = await provider.call({ to: vaultAddress, data: '0x38d52e0f' });
+      if (assetRes && assetRes !== '0x' && assetRes.length >= 66) {
+        const addr = '0x' + assetRes.slice(-40);
+        if (ethers.isAddress(addr) && addr !== ethers.ZeroAddress) {
+          tokenAddress = ethers.getAddress(addr);
+        }
+      }
+    } catch {}
+
+    // Fallback: Try token() -> 0xfc0c5465
+    if (!tokenAddress) {
+      try {
+        const tokenRes = await provider.call({ to: vaultAddress, data: '0xfc0c5465' });
+        if (tokenRes && tokenRes !== '0x' && tokenRes.length >= 66) {
+          const addr = '0x' + tokenRes.slice(-40);
+          if (ethers.isAddress(addr) && addr !== ethers.ZeroAddress) {
+            tokenAddress = ethers.getAddress(addr);
+          }
+        }
+      } catch {}
+    }
+
+    if (tokenAddress) {
+      const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+      const [symbol, name, decimals] = await Promise.all([
+        tokenContract.symbol().catch(() => 'TOKEN'),
+        tokenContract.name().catch(() => 'Vault Token'),
+        tokenContract.decimals().catch(() => 6),
+      ]);
+      return {
+        symbol: String(symbol),
+        name: String(name),
+        decimals: Number(decimals),
+        address: tokenAddress,
+        isDetected: true,
+        isNative: false,
+      };
+    }
+  } catch {}
+  return null;
+}
+
+function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig): VaultAsset[] {
+  if (targetVault.chainType === 'zigchain') {
+    return [ZIGCHAIN_USDC, ZIGCHAIN_ZIG];
+  }
+
+  const isSepolia = evmConf.chainId === 11155111 || evmConf.rpcUrl.includes('sepolia');
+  const list: VaultAsset[] = [];
+
+  // If vault has an auto-detected asset, prioritize it at the top
+  if (targetVault.detectedAsset) {
+    list.push({ ...targetVault.detectedAsset, isDetected: true });
+  }
+
+  const standardTokens = isSepolia
+    ? [SEPOLIA_USDC, SEPOLIA_USDT, SEPOLIA_ETH]
+    : [MAINNET_USDT, MAINNET_USDC, NATIVE_ETH];
+
+  for (const item of standardTokens) {
+    if (!list.some((existing) => existing.symbol === item.symbol)) {
+      list.push(item);
+    }
+  }
+
+  if (targetVault.customAsset && !list.some((existing) => existing.symbol === targetVault.customAsset?.symbol)) {
+    list.push(targetVault.customAsset);
+  }
+
+  return list;
+}
+
+function getActiveVaultAsset(targetVault: Vault, evmConf: EvmConfig): VaultAsset {
+  const available = getAvailableAssetsForVault(targetVault, evmConf);
+  if (targetVault.selectedAssetSymbol) {
+    const matched = available.find((a) => a.symbol === targetVault.selectedAssetSymbol);
+    if (matched) return matched;
+  }
+  if (targetVault.tokenSymbol) {
+    const matched = available.find((a) => a.symbol === targetVault.tokenSymbol);
+    if (matched) return matched;
+  }
+  return available.find((a) => a.isDetected) || available[0]!;
+}
 
 type AutomationStatus = 'stopped' | 'running' | 'paused';
 type DeliveryMode = 'once' | 'automation';
@@ -79,12 +211,103 @@ const defaultIbcTransferConfig: IbcTransferConfig = {
 };
 
 const defaultVaults: Vault[] = [
-  { pair: 'PAIR 1', name: 'Stablecoin Yield', address: 'Not configured', chainType: 'zigchain', accent: 'blue', tvl: '$39,717,012', apy: '9.95%', type: 'Stablecoin Yield', risk: 'Low', summary: 'Low-risk stablecoin strategy on ZIGChain' },
-  { pair: 'PAIR 2', name: 'Opportunistic Credit', address: 'Not configured', chainType: 'zigchain', accent: 'purple', tvl: '$16,679,657', apy: '10.32%', type: 'Opportunistic', risk: 'Low', summary: 'Diversified private credit strategy on ZIGChain' },
-  { pair: 'PAIR 3', name: 'Core Income', address: 'Not configured', chainType: 'zigchain', accent: 'orange', tvl: '$11,329,834', apy: '8.03%', type: 'Core Income', risk: 'Low', summary: 'Lower-volatility private credit strategy on ZIGChain' },
-  { pair: 'ERC 1', name: 'Nawa Finance', address: '0x6FE78B942C566fE2b8D0881cf3577C1B1511F204', chainType: 'erc', accent: 'green', tvl: '$24,850,000', apy: '12.40%', type: 'Shariah Ethical Yield', risk: 'Low', summary: 'Shariah-compliant ethical asset-backed yield vault', tokenSymbol: 'ETH', tokenDecimals: 18 },
-  { pair: 'ERC 2', name: 'Valdora', address: '0x1754fCD1F0EBb306286dd16F00abCf46731a92FC', chainType: 'erc', accent: 'cyan', tvl: '$18,320,000', apy: '11.85%', type: 'Liquid Staking & Yield', risk: 'Medium', summary: 'Composable institutional liquid staking & yield vault', tokenSymbol: 'ETH', tokenDecimals: 18 },
-  { pair: 'ERC 3', name: 'Sepolia Testnet Vault', address: '0xe1908800dBEFE8a571A8580D9Cc546091e6FDF9a', chainType: 'erc', accent: 'orange', tvl: '$5,400,000', apy: '14.20%', type: 'Testnet Yield Strategy', risk: 'Low', summary: 'Sepolia EVM testnet vault strategy for testing and automation', tokenSymbol: 'ETH', tokenDecimals: 18 },
+  {
+    pair: 'PAIR 1',
+    name: 'Stablecoin Yield',
+    address: 'Not configured',
+    chainType: 'zigchain',
+    accent: 'blue',
+    tvl: '$39,717,012',
+    apy: '9.95%',
+    type: 'Stablecoin Yield',
+    risk: 'Low',
+    summary: 'Low-risk stablecoin strategy on ZIGChain (USDC)',
+    tokenSymbol: 'USDC',
+    tokenDecimals: 6,
+    detectedAsset: ZIGCHAIN_USDC,
+    selectedAssetSymbol: 'USDC',
+  },
+  {
+    pair: 'PAIR 2',
+    name: 'Opportunistic Credit',
+    address: 'Not configured',
+    chainType: 'zigchain',
+    accent: 'purple',
+    tvl: '$16,679,657',
+    apy: '10.32%',
+    type: 'Opportunistic',
+    risk: 'Low',
+    summary: 'Diversified private credit strategy on ZIGChain (USDC)',
+    tokenSymbol: 'USDC',
+    tokenDecimals: 6,
+    detectedAsset: ZIGCHAIN_USDC,
+    selectedAssetSymbol: 'USDC',
+  },
+  {
+    pair: 'PAIR 3',
+    name: 'Core Income',
+    address: 'Not configured',
+    chainType: 'zigchain',
+    accent: 'orange',
+    tvl: '$11,329,834',
+    apy: '8.03%',
+    type: 'Core Income',
+    risk: 'Low',
+    summary: 'Lower-volatility private credit strategy on ZIGChain',
+    tokenSymbol: 'USDC',
+    tokenDecimals: 6,
+    detectedAsset: ZIGCHAIN_USDC,
+    selectedAssetSymbol: 'USDC',
+  },
+  {
+    pair: 'ERC 1',
+    name: 'Nawa Finance',
+    address: '0x6FE78B942C566fE2b8D0881cf3577C1B1511F204',
+    chainType: 'erc',
+    accent: 'green',
+    tvl: '$24,850,000',
+    apy: '12.40%',
+    type: 'Shariah Ethical Yield',
+    risk: 'Low',
+    summary: 'Shariah-compliant ethical asset-backed yield vault (USDT)',
+    tokenSymbol: 'USDT',
+    tokenDecimals: 6,
+    tokenAddress: '0xdAC17F958D2ee523a2206206994597C13D831ec7',
+    detectedAsset: MAINNET_USDT,
+    selectedAssetSymbol: 'USDT',
+  },
+  {
+    pair: 'ERC 2',
+    name: 'Valdora',
+    address: '0x1754fCD1F0EBb306286dd16F00abCf46731a92FC',
+    chainType: 'erc',
+    accent: 'cyan',
+    tvl: '$18,320,000',
+    apy: '11.85%',
+    type: 'Liquid Staking & Yield',
+    risk: 'Medium',
+    summary: 'Composable institutional liquid staking & yield vault (USDT)',
+    tokenSymbol: 'USDT',
+    tokenDecimals: 6,
+    tokenAddress: '0xdAC17F958D2ee523a2206206994597C13D831ec7',
+    detectedAsset: MAINNET_USDT,
+    selectedAssetSymbol: 'USDT',
+  },
+  {
+    pair: 'ERC 3',
+    name: 'Sepolia Testnet Vault',
+    address: '0xe1908800dBEFE8a571A8580D9Cc546091e6FDF9a',
+    chainType: 'erc',
+    accent: 'orange',
+    tvl: '$5,400,000',
+    apy: '14.20%',
+    type: 'Testnet Yield Strategy',
+    risk: 'Low',
+    summary: 'Sepolia EVM testnet vault strategy for testing and automation',
+    tokenSymbol: 'ETH',
+    tokenDecimals: 18,
+    selectedAssetSymbol: 'ETH',
+  },
 ];
 
 const intervals = [
@@ -313,6 +536,8 @@ export default function Home() {
   const [newVaultDecimals, setNewVaultDecimals] = useState('');
   const [addVaultError, setAddVaultError] = useState('');
   const [savingVault, setSavingVault] = useState(false);
+  const [detectedAddVaultAsset, setDetectedAddVaultAsset] = useState<VaultAsset | null>(null);
+  const [detectingAsset, setDetectingAsset] = useState(false);
 
   // Delete Vault Modal State
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
@@ -338,8 +563,70 @@ export default function Home() {
   const automation = automations[selectedVault] ?? { mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null };
   const walletSession = walletSessions[selectedVault] ?? { mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false };
 
-  const currentTokenSymbol = vault?.tokenSymbol || (vault?.chainType === 'erc' ? 'ETH' : transferToken.symbol);
-  const currentTokenDecimals = vault?.tokenDecimals ?? (vault?.chainType === 'erc' ? 18 : transferToken.decimals);
+  const activeVaultAsset = getActiveVaultAsset(vault, evmConfig);
+  const currentTokenSymbol = activeVaultAsset.symbol;
+  const currentTokenDecimals = activeVaultAsset.decimals;
+  const availableVaultAssets = getAvailableAssetsForVault(vault, evmConfig);
+
+  function handleSelectVaultAsset(vaultIndex: number, asset: VaultAsset) {
+    setVaults((cur) =>
+      cur.map((v, i) => {
+        if (i !== vaultIndex) return v;
+        return {
+          ...v,
+          selectedAssetSymbol: asset.symbol,
+          tokenSymbol: asset.symbol,
+          tokenDecimals: asset.decimals,
+          tokenAddress: asset.address,
+        };
+      })
+    );
+    const targetVault = vaultsRef.current[vaultIndex];
+    if (targetVault) {
+      vaultsRef.current[vaultIndex] = {
+        ...targetVault,
+        selectedAssetSymbol: asset.symbol,
+        tokenSymbol: asset.symbol,
+        tokenDecimals: asset.decimals,
+        tokenAddress: asset.address,
+      };
+    }
+    const sess = walletSessionsRef.current[vaultIndex];
+    if (sess?.address) {
+      void loadBalance(vaultIndex, sess.address);
+    }
+  }
+
+  // Live ERC-4626 asset auto-detection when adding an EVM vault
+  useEffect(() => {
+    if (newVaultChain !== 'erc' || !/^0x[0-9a-fA-F]{40}$/.test(newVaultAddress.trim())) {
+      setDetectedAddVaultAsset(null);
+      return;
+    }
+    let active = true;
+    setDetectingAsset(true);
+    const timer = setTimeout(async () => {
+      try {
+        const detected = await detectVaultAsset(newVaultAddress.trim(), evmConfigRef.current);
+        if (active) {
+          setDetectedAddVaultAsset(detected);
+          if (detected) {
+            setNewVaultSymbol(detected.symbol);
+            setNewVaultDecimals(String(detected.decimals));
+          }
+        }
+      } catch {
+        if (active) setDetectedAddVaultAsset(null);
+      } finally {
+        if (active) setDetectingAsset(false);
+      }
+    }, 450);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [newVaultAddress, newVaultChain]);
 
   const selectedHistory = useMemo(() => history.filter((entry) => entry.vaultIndex === selectedVault && (historyFilter === 'All' || entry.status === historyFilter)), [history, historyFilter, selectedVault]);
   const successfulHistory = history.filter((entry) => entry.vaultIndex === selectedVault && entry.status === 'Success');
@@ -507,10 +794,30 @@ export default function Home() {
     if (currentVault.chainType === 'erc') {
       try {
         const provider = new ethers.JsonRpcProvider(evmConfigRef.current.rpcUrl);
-        const balanceWei = await provider.getBalance(address);
-        const baseUnits = balanceWei.toString();
-        if (generation === (sessionGenerationRef.current[index] ?? 0)) {
-          patchWalletSession(index, { balanceBaseUnits: baseUnits, nativeGasBaseUnits: baseUnits });
+        const activeAsset = getActiveVaultAsset(currentVault, evmConfigRef.current);
+
+        let gasWei = 0n;
+        try {
+          gasWei = await provider.getBalance(address);
+        } catch {}
+        const nativeGasBaseUnits = gasWei.toString();
+
+        if (activeAsset.isNative || !activeAsset.address) {
+          if (generation === (sessionGenerationRef.current[index] ?? 0)) {
+            patchWalletSession(index, { balanceBaseUnits: nativeGasBaseUnits, nativeGasBaseUnits });
+          }
+        } else {
+          let tokenBaseUnits = '0';
+          try {
+            const tokenContract = new ethers.Contract(activeAsset.address, ERC20_ABI, provider);
+            const bal = await tokenContract.balanceOf(address);
+            tokenBaseUnits = bal.toString();
+          } catch {
+            // Best effort token query
+          }
+          if (generation === (sessionGenerationRef.current[index] ?? 0)) {
+            patchWalletSession(index, { balanceBaseUnits: tokenBaseUnits, nativeGasBaseUnits });
+          }
         }
       } catch {
         // Leave existing balance if EVM RPC is unreachable
@@ -758,7 +1065,8 @@ export default function Home() {
 
   function getAmountRange(index: number) {
     const currentVault = vaults[index];
-    const decimals = currentVault?.tokenDecimals ?? (currentVault?.chainType === 'erc' ? 18 : transferToken.decimals);
+    const activeAsset = currentVault ? getActiveVaultAsset(currentVault, evmConfig) : null;
+    const decimals = activeAsset?.decimals ?? (currentVault?.tokenDecimals ?? (currentVault?.chainType === 'erc' ? 18 : transferToken.decimals));
     const settings = automations[index];
     const minimum = parseTokenAmount(settings.minimum, decimals);
     const maximum = settings.mode === 'once' ? minimum : settings.maximum.trim() ? parseTokenAmount(settings.maximum, decimals) : minimum;
@@ -770,7 +1078,9 @@ export default function Home() {
   function canSend(index: number) {
     const target = vaults[index];
     const session = walletSessions[index];
-    const decimals = target?.tokenDecimals ?? (target?.chainType === 'erc' ? 18 : transferToken.decimals);
+    if (!target) return false;
+    const activeAsset = getActiveVaultAsset(target, evmConfig);
+    const decimals = activeAsset.decimals;
     return Boolean(session?.hasSigner && target?.address && target.address !== 'Not configured' && hasValidRange(automations[index], decimals));
   }
 
@@ -842,39 +1152,68 @@ export default function Home() {
       if (target.chainType === 'erc') {
         if (universalSigner.type !== 'evm') throw new Error('Signer is not an EVM wallet.');
 
-        const symbol = target.tokenSymbol ?? 'ETH';
-        const decimals = target.tokenDecimals ?? 18;
+        const activeAsset = getActiveVaultAsset(target, evmConfigRef.current);
+        const symbol = activeAsset.symbol;
+        const decimals = activeAsset.decimals;
 
-        // Pre-flight balance check on EVM
-        let balanceWei: bigint | null = null;
+        // Pre-flight gas check on EVM (must have native ETH to pay network gas fees)
+        let gasBalanceWei: bigint | null = null;
         try {
-          balanceWei = await universalSigner.provider.getBalance(universalSigner.wallet.address);
-        } catch {
-          // If RPC fails balance check, sendTransaction below will trigger standard network error handling
+          gasBalanceWei = await universalSigner.provider.getBalance(universalSigner.wallet.address);
+        } catch {}
+
+        if (gasBalanceWei !== null && gasBalanceWei === 0n) {
+          throw new Error(`Insufficient funds for gas: Your wallet (${universalSigner.wallet.address.slice(0, 6)}…${universalSigner.wallet.address.slice(-4)}) has 0 ETH. EVM transactions require ETH to pay network gas fees.`);
         }
 
-        if (balanceWei !== null) {
-          if (balanceWei === 0n) {
-            throw new Error(`Insufficient balance: Your wallet (${universalSigner.wallet.address.slice(0, 6)}…${universalSigner.wallet.address.slice(-4)}) has 0 ${symbol}. Please fund your wallet with ${symbol} to pay for the transfer and gas fees.`);
+        let txHash = '';
+
+        if (activeAsset.isNative || !activeAsset.address) {
+          // Native ETH transfer
+          if (gasBalanceWei !== null) {
+            if (gasBalanceWei < amount) {
+              throw new Error(`Insufficient balance: Current balance (${formatBaseUnits(gasBalanceWei, decimals)} ${symbol}) is less than transfer amount (${formatBaseUnits(amount, decimals)} ${symbol}).`);
+            }
           }
-          if (balanceWei < amount) {
-            throw new Error(`Insufficient balance: Current balance (${formatBaseUnits(balanceWei, decimals)} ${symbol}) is less than transfer amount (${formatBaseUnits(amount, decimals)} ${symbol}).`);
+
+          const tx = await universalSigner.wallet.sendTransaction({
+            to: target.address,
+            value: amount,
+          });
+          const receipt = await tx.wait(1);
+          if (!receipt || receipt.status === 0) throw new Error('EVM transaction was reverted by the network.');
+          txHash = tx.hash;
+        } else {
+          // ERC-20 token transfer (USDT, USDC, etc.)
+          const tokenContract = new ethers.Contract(activeAsset.address, ERC20_ABI, universalSigner.wallet);
+
+          let tokenBal: bigint | null = null;
+          try {
+            tokenBal = await tokenContract.balanceOf(universalSigner.wallet.address);
+          } catch {}
+
+          if (tokenBal !== null) {
+            if (tokenBal === 0n) {
+              throw new Error(`Insufficient balance: Your wallet (${universalSigner.wallet.address.slice(0, 6)}…${universalSigner.wallet.address.slice(-4)}) has 0 ${symbol}. Please fund your wallet with ${symbol}.`);
+            }
+            if (tokenBal < amount) {
+              throw new Error(`Insufficient balance: Current balance (${formatBaseUnits(tokenBal, decimals)} ${symbol}) is less than transfer amount (${formatBaseUnits(amount, decimals)} ${symbol}).`);
+            }
           }
+
+          const tx = await tokenContract.transfer(target.address, amount);
+          const receipt = await tx.wait(1);
+          if (!receipt || receipt.status === 0) throw new Error(`${symbol} transfer was reverted by the network.`);
+          txHash = tx.hash;
         }
 
-        const tx = await universalSigner.wallet.sendTransaction({
-          to: target.address,
-          value: amount,
-        });
-        const receipt = await tx.wait(1);
-        if (!receipt || receipt.status === 0) throw new Error('EVM transaction was reverted by the network.');
         if (generation !== (sessionGenerationRef.current[index] ?? 0)) return true;
 
-        setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Success', hash: tx.hash } : item));
+        setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Success', hash: txHash } : item));
         setTransferStatus({
           kind: 'success',
-          message: `${formatBaseUnits(amount, target.tokenDecimals ?? 18)} ${target.tokenSymbol ?? 'ETH'} transferred to ${target.name}.`,
-          hash: tx.hash,
+          message: `${formatBaseUnits(amount, decimals)} ${symbol} transferred to ${target.name}.`,
+          hash: txHash,
         });
         try { await loadBalance(index, universalSigner.wallet.address, generation); } catch {}
         return true;
@@ -935,8 +1274,9 @@ export default function Home() {
         return true;
       }
     } catch (error) {
-      const symbol = target.tokenSymbol ?? (target.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
-      const message = formatBlockchainError(error, target.chainType, symbol);
+      const activeAsset = target ? getActiveVaultAsset(target, evmConfigRef.current) : null;
+      const symbol = activeAsset?.symbol ?? (target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol));
+      const message = formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol);
       if (generation === (sessionGenerationRef.current[index] ?? 0)) {
         setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Failed', error: message } : item));
         setTransferStatus({ kind: 'error', message });
@@ -1087,6 +1427,9 @@ export default function Home() {
         summary,
         tokenSymbol: symbol,
         tokenDecimals: decimals,
+        tokenAddress: detectedAddVaultAsset?.address,
+        detectedAsset: detectedAddVaultAsset || undefined,
+        selectedAssetSymbol: symbol,
       };
 
       const updatedVaults = [...vaults, newVault];
@@ -1110,6 +1453,7 @@ export default function Home() {
       setNewVaultSummary('');
       setNewVaultSymbol('');
       setNewVaultDecimals('');
+      setDetectedAddVaultAsset(null);
     } catch (err) {
       setAddVaultError(err instanceof Error ? err.message : 'Failed to create vault.');
     } finally {
@@ -1508,6 +1852,25 @@ export default function Home() {
                 </label>
               </div>
 
+              {newVaultChain === 'erc' && detectingAsset && (
+                <div className="detecting-asset-notice">
+                  <span className="spinner-dots" /> Inspecting contract for ERC-4626 asset()…
+                </div>
+              )}
+
+              {newVaultChain === 'erc' && detectedAddVaultAsset && (
+                <div className="detected-asset-banner">
+                  <div className="detected-asset-badge">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                    ERC-4626 VAULT ASSET DETECTED
+                  </div>
+                  <div className="detected-asset-content">
+                    <strong>{detectedAddVaultAsset.name} ({detectedAddVaultAsset.symbol})</strong>
+                    <p>Underlying Token: <code>{detectedAddVaultAsset.address}</code> ({detectedAddVaultAsset.decimals} decimals)</p>
+                  </div>
+                </div>
+              )}
+
               <div className="form-row three-col">
                 <label>
                   <span>TOKEN SYMBOL</span>
@@ -1724,8 +2087,16 @@ export default function Home() {
                 <div className="connected-account">
                   <span>UNLOCKED ADDRESS</span>
                   <code>{walletSession.address}</code>
-                  <span>AVAILABLE BALANCE</span>
+                  <span>AVAILABLE {currentTokenSymbol} BALANCE</span>
                   <strong>{formatBaseUnits(walletSession.balanceBaseUnits, currentTokenDecimals)} {currentTokenSymbol}</strong>
+                  {vault.chainType === 'erc' && !activeVaultAsset.isNative && (
+                    <>
+                      <span style={{ marginTop: '10px' }}>GAS RESERVE (ETH)</span>
+                      <strong className={BigInt(walletSession.nativeGasBaseUnits || '0') === 0n ? 'gas-zero-warning' : ''}>
+                        {formatBaseUnits(walletSession.nativeGasBaseUnits, 18)} ETH
+                      </strong>
+                    </>
+                  )}
                 </div>
                 <p>Session signer resides in memory and never leaves this tab. Close or clear this session when finished.</p>
                 <button className="disconnect-button" type="button" onClick={() => void disconnectWallet(selectedVault)}>
@@ -1804,12 +2175,35 @@ export default function Home() {
             <p className="snapshot-note">Verified vault contract destination</p>
             <div className="detail-list">
               <div><span>Vault Target</span><code>{vault.address}</code></div>
-              <div><span>Asset / Token</span><strong>{currentTokenSymbol}</strong></div>
-              <div><span>Source Balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.balanceBaseUnits, currentTokenDecimals)} ${currentTokenSymbol}` : '—'}</strong></div>
+              <div>
+                <span>Deposit Asset</span>
+                <strong>
+                  {activeVaultAsset.symbol}
+                  {activeVaultAsset.isDetected ? ' (Auto-detected)' : ''}
+                </strong>
+              </div>
+              {activeVaultAsset.address && (
+                <div><span>Token Contract</span><code>{activeVaultAsset.address.slice(0, 10)}…{activeVaultAsset.address.slice(-6)}</code></div>
+              )}
+              <div><span>Token Balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.balanceBaseUnits, currentTokenDecimals)} ${currentTokenSymbol}` : '—'}</strong></div>
+              {vault.chainType === 'erc' && (
+                <div>
+                  <span>ETH Gas Reserve</span>
+                  <strong className={BigInt(walletSession.nativeGasBaseUnits || '0') === 0n && walletSession.address ? 'gas-zero-warning' : ''}>
+                    {walletSession.address ? `${formatBaseUnits(walletSession.nativeGasBaseUnits, 18)} ETH` : '—'}
+                  </strong>
+                </div>
+              )}
               <div><span>Decimals</span><strong>{currentTokenDecimals}</strong></div>
               <div><span>Total Transferred</span><strong>{formatBaseUnits(totalTransferred, currentTokenDecimals)} {currentTokenSymbol}</strong></div>
               <div><span>Execution Count</span><strong>{successfulHistory.length}</strong></div>
             </div>
+            {vault.chainType === 'erc' && walletSession.address && BigInt(walletSession.nativeGasBaseUnits || '0') === 0n && (
+              <div className="gas-warning-notice">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg>
+                <span>Wallet has 0 ETH for gas. Fund your wallet with ETH on this network to execute transactions.</span>
+              </div>
+            )}
             <div className="interface-banner">
               <span>⌁</span>
               <div>
@@ -1849,6 +2243,39 @@ export default function Home() {
           <div className="direction-bar">
             <span className="active">SOURCE WALLET <b>→</b> {vault.name.toUpperCase()}</span>
             <span>{vault.chainType === 'erc' ? 'EVM TRANSFER' : 'COSMOS TRANSFER'}</span>
+          </div>
+
+          {/* Deposit Asset Selector */}
+          <div className="deposit-asset-section">
+            <div className="deposit-asset-header">
+              <span className="deposit-asset-title">SELECT DEPOSIT ASSET</span>
+              {activeVaultAsset.isDetected && (
+                <span className="auto-detected-badge">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  Auto-detected from vault contract
+                </span>
+              )}
+            </div>
+            <div className="asset-pill-group">
+              {availableVaultAssets.map((asset) => {
+                const isSelected = activeVaultAsset.symbol === asset.symbol;
+                return (
+                  <button
+                    key={asset.symbol}
+                    type="button"
+                    className={`asset-pill-btn ${isSelected ? 'active' : ''}`}
+                    disabled={automation.status === 'running'}
+                    onClick={() => handleSelectVaultAsset(selectedVault, asset)}
+                  >
+                    <div className="pill-top">
+                      <strong>{asset.symbol}</strong>
+                      {asset.isDetected && <span className="pill-detected-badge">Vault Preferred</span>}
+                    </div>
+                    <small>{asset.isNative ? 'Native Gas Token' : `${asset.name || asset.symbol} · ${asset.decimals} Dec`}</small>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <div className={`amount-grid ${automation.mode === 'once' ? 'single' : ''}`}>
