@@ -1681,18 +1681,25 @@ button {
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 14px;
   font-size: 12px;
+  flex-wrap: wrap;
 }
 
 .transfer-status strong {
   font-size: 11px;
   letter-spacing: 0.06em;
+  white-space: nowrap;
+  flex-shrink: 0;
+  padding-top: 1px;
 }
 
 .transfer-status span {
   color: var(--text-secondary);
+  line-height: 1.5;
+  word-break: break-word;
+  flex: 1 1 240px;
 }
 
 .transfer-status code {

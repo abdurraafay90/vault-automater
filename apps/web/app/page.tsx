@@ -144,6 +144,112 @@ function formatCountdown(nextAt: number | null, now: number) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
+function formatBlockchainError(error: unknown, chainType: ChainType, symbol = 'ETH'): string {
+  if (!error) return 'Transfer failed.';
+  const raw = error instanceof Error ? error.message : String(error);
+  const code = (error as { code?: string })?.code || '';
+  const reason = (error as { reason?: string })?.reason || '';
+
+  // If already a clean pre-flight message, preserve it
+  if (/^Insufficient (funds|balance):/i.test(raw)) {
+    return raw;
+  }
+
+  // Ethers CALL_EXCEPTION on estimateGas (frequently due to 0 balance or insufficient gas)
+  if (
+    code === 'CALL_EXCEPTION' ||
+    raw.includes('CALL_EXCEPTION') ||
+    raw.includes('estimateGas') ||
+    raw.includes('missing revert data')
+  ) {
+    if (reason) return `Transaction reverted by network: ${reason}. Check vault contract rules and balance.`;
+    return `Insufficient funds for gas: Your wallet does not have enough ${symbol} to pay for network gas fees and transfer value.`;
+  }
+
+  // Insufficient funds / balance
+  if (
+    code === 'INSUFFICIENT_FUNDS' ||
+    /insufficient\s+funds/i.test(raw) ||
+    /insufficient\s+balance/i.test(raw) ||
+    /insufficient\s+fee/i.test(raw) ||
+    /smaller\s+than/i.test(raw) ||
+    /exceeds\s+balance/i.test(raw) ||
+    /gas\s*\*\s*price\s*\+\s*value/i.test(raw)
+  ) {
+    return `Insufficient balance: Your wallet does not have enough ${symbol} to cover the transfer amount plus network gas fees.`;
+  }
+
+  // Nonce / Sequence errors
+  if (
+    code === 'NONCE_EXPIRED' ||
+    /nonce\s+too\s+low/i.test(raw) ||
+    /replacement\s+underpriced/i.test(raw) ||
+    /account\s+sequence\s+mismatch/i.test(raw) ||
+    /incorrect\s+account\s+sequence/i.test(raw)
+  ) {
+    return 'Transaction sequence error: A previous transaction is still pending on the network. Please wait a moment and retry.';
+  }
+
+  // Gas estimation failure / Out of gas / Intrinsic gas
+  if (
+    code === 'UNPREDICTABLE_GAS_LIMIT' ||
+    /out\s+of\s+gas/i.test(raw) ||
+    /intrinsic\s+gas\s+too\s+low/i.test(raw) ||
+    /gas\s+limit/i.test(raw)
+  ) {
+    return `Gas estimation failed: The network cannot simulate this transaction. Verify your ${symbol} balance and that the target address is valid.`;
+  }
+
+  // User rejection
+  if (code === 'ACTION_REJECTED' || /user\s+rejected/i.test(raw) || /user\s+denied/i.test(raw)) {
+    return 'Transaction was cancelled by the user.';
+  }
+
+  // Network / RPC connection issues
+  if (
+    code === 'NETWORK_ERROR' ||
+    code === 'SERVER_ERROR' ||
+    code === 'TIMEOUT' ||
+    /ETIMEDOUT|ECONNREFUSED|fetch\s+failed|502|503|504|Gateway|rate\s*limit|429|connection\s+refused/i.test(raw)
+  ) {
+    return 'Network connection error: The blockchain RPC node is unreachable or timed out. Please check your internet or RPC settings.';
+  }
+
+  // Invalid address format / Bech32 / Checksum
+  if (
+    code === 'INVALID_ARGUMENT' ||
+    /bad\s+address/i.test(raw) ||
+    /invalid\s+address/i.test(raw) ||
+    /checksum/i.test(raw) ||
+    /decoding\s+bech32/i.test(raw)
+  ) {
+    return 'Invalid destination address format. Please verify the vault recipient address.';
+  }
+
+  // Contract revert with specific reason
+  if (reason) {
+    return `Transaction reverted: ${reason}`;
+  }
+
+  // Clean short messages
+  if (!raw.includes('{') && !raw.includes('(') && raw.length < 140) {
+    return raw;
+  }
+
+  // Strip raw JSON dumps from ethers or CosmJS
+  if (raw.includes('{') && raw.includes('}')) {
+    const cleaned = raw.replace(/\{[\S\s]*\}/g, '').replace(/\(action=[\S\s]*\)/g, '').trim();
+    if (cleaned.length > 5 && cleaned.length < 120) return cleaned;
+    return `Transaction failed on ${chainType === 'erc' ? 'Ethereum / EVM' : 'ZIGChain'}. Please verify your wallet balance and network gas.`;
+  }
+
+  if (raw.length > 180) {
+    return `${raw.slice(0, 177)}...`;
+  }
+
+  return raw;
+}
+
 function createInitialAutomations(count: number): Automation[] {
   return Array.from({ length: count }, () => ({ mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null }));
 }
@@ -734,6 +840,27 @@ export default function Home() {
     try {
       if (target.chainType === 'erc') {
         if (universalSigner.type !== 'evm') throw new Error('Signer is not an EVM wallet.');
+
+        const symbol = target.tokenSymbol ?? 'ETH';
+        const decimals = target.tokenDecimals ?? 18;
+
+        // Pre-flight balance check on EVM
+        let balanceWei: bigint | null = null;
+        try {
+          balanceWei = await universalSigner.provider.getBalance(universalSigner.wallet.address);
+        } catch {
+          // If RPC fails balance check, sendTransaction below will trigger standard network error handling
+        }
+
+        if (balanceWei !== null) {
+          if (balanceWei === 0n) {
+            throw new Error(`Insufficient balance: Your wallet (${universalSigner.wallet.address.slice(0, 6)}…${universalSigner.wallet.address.slice(-4)}) has 0 ${symbol}. Please fund your wallet with ${symbol} to pay for the transfer and gas fees.`);
+          }
+          if (balanceWei < amount) {
+            throw new Error(`Insufficient balance: Current balance (${formatBaseUnits(balanceWei, decimals)} ${symbol}) is less than transfer amount (${formatBaseUnits(amount, decimals)} ${symbol}).`);
+          }
+        }
+
         const tx = await universalSigner.wallet.sendTransaction({
           to: target.address,
           value: amount,
@@ -756,6 +883,18 @@ export default function Home() {
         const [account] = await signer.getAccounts();
         if (!account) throw new Error('Signer account is unavailable.');
         if (generation !== (sessionGenerationRef.current[index] ?? 0)) return false;
+
+        // Pre-flight balance check on Cosmos if known
+        const currentBalanceStr = walletSessionsRef.current[index]?.balanceBaseUnits;
+        if (currentBalanceStr) {
+          const currentBal = BigInt(currentBalanceStr);
+          if (currentBal === 0n) {
+            throw new Error(`Insufficient balance: Your wallet (${account.address.slice(0, 8)}…${account.address.slice(-4)}) has 0 ${transferTokenRef.current.symbol}. Please fund your wallet before transferring.`);
+          }
+          if (currentBal < amount) {
+            throw new Error(`Insufficient balance: Current balance (${formatBaseUnits(currentBal, transferTokenRef.current.decimals)} ${transferTokenRef.current.symbol}) is less than transfer amount (${formatBaseUnits(amount, transferTokenRef.current.decimals)} ${transferTokenRef.current.symbol}).`);
+          }
+        }
 
         const client = await SigningStargateClient.connectWithSigner(
           chainConfigRef.current.rpcUrl,
@@ -795,7 +934,8 @@ export default function Home() {
         return true;
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Transfer failed.';
+      const symbol = target.tokenSymbol ?? (target.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
+      const message = formatBlockchainError(error, target.chainType, symbol);
       if (generation === (sessionGenerationRef.current[index] ?? 0)) {
         setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Failed', error: message } : item));
         setTransferStatus({ kind: 'error', message });
@@ -837,7 +977,9 @@ export default function Home() {
       scheduleNextCycle(index);
     } catch (error) {
       pauseAutomation(index);
-      setTransferStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Automation cycle failed.' });
+      const target = vaultsRef.current[index];
+      const symbol = target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
+      setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
     }
   }
 
@@ -853,7 +995,9 @@ export default function Home() {
       setTransferStatus(null);
       void runAutomationCycle(index);
     } catch (error) {
-      setTransferStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Automation could not start.' });
+      const target = vaultsRef.current[index];
+      const symbol = target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
+      setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
     }
   }
 
@@ -869,7 +1013,9 @@ export default function Home() {
       const { minimum } = getAmountRange(selectedVault);
       void enqueueTransfer(selectedVault, minimum, 'Manual');
     } catch (error) {
-      setTransferStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Transfer could not start.' });
+      const target = vaultsRef.current[selectedVault];
+      const symbol = target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
+      setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
     }
   }
 
