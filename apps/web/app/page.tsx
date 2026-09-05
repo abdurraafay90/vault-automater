@@ -78,55 +78,64 @@ const SEPOLIA_ETH: VaultAsset = { symbol: 'ETH', name: 'Sepolia Ether', decimals
 const ZIGCHAIN_USDC: VaultAsset = { symbol: 'USDC', name: 'Noble USDC', decimals: 6, isDetected: true };
 const ZIGCHAIN_ZIG: VaultAsset = { symbol: 'ZIG', name: 'ZIG Native Gas', decimals: 6, isNative: true };
 
-async function detectVaultAsset(rpcUrl: string, vaultAddress: string): Promise<VaultAsset | null> {
+async function detectVaultAsset(vaultAddress: string, evmConf?: EvmConfig): Promise<VaultAsset | null> {
   if (!vaultAddress || !/^0x[0-9a-fA-F]{40}$/.test(vaultAddress)) return null;
-  try {
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
-    const code = await provider.getCode(vaultAddress);
-    if (!code || code === '0x') return null;
+  const urls = [
+    evmConf?.rpcUrl,
+    'https://eth-mainnet.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
+    'https://eth-sepolia.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
+  ];
+  const uniqueUrls = Array.from(new Set(urls.filter(Boolean))) as string[];
 
-    let tokenAddress = '';
-    // Try ERC-4626 asset() -> 0x38d52e0f
+  for (const url of uniqueUrls) {
     try {
-      const assetRes = await provider.call({ to: vaultAddress, data: '0x38d52e0f' });
-      if (assetRes && assetRes !== '0x' && assetRes.length >= 66) {
-        const addr = '0x' + assetRes.slice(-40);
-        if (ethers.isAddress(addr) && addr !== ethers.ZeroAddress) {
-          tokenAddress = ethers.getAddress(addr);
-        }
-      }
-    } catch {}
+      const provider = new ethers.JsonRpcProvider(url);
+      const code = await provider.getCode(vaultAddress);
+      if (!code || code === '0x') continue;
 
-    // Fallback: Try token() -> 0xfc0c5465
-    if (!tokenAddress) {
+      let tokenAddress = '';
+      // Try ERC-4626 asset() -> 0x38d52e0f
       try {
-        const tokenRes = await provider.call({ to: vaultAddress, data: '0xfc0c5465' });
-        if (tokenRes && tokenRes !== '0x' && tokenRes.length >= 66) {
-          const addr = '0x' + tokenRes.slice(-40);
+        const assetRes = await provider.call({ to: vaultAddress, data: '0x38d52e0f' });
+        if (assetRes && assetRes !== '0x' && assetRes.length >= 66) {
+          const addr = '0x' + assetRes.slice(-40);
           if (ethers.isAddress(addr) && addr !== ethers.ZeroAddress) {
             tokenAddress = ethers.getAddress(addr);
           }
         }
       } catch {}
-    }
 
-    if (tokenAddress) {
-      const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-      const [symbol, name, decimals] = await Promise.all([
-        tokenContract.symbol().catch(() => 'TOKEN'),
-        tokenContract.name().catch(() => 'Vault Token'),
-        tokenContract.decimals().catch(() => 6),
-      ]);
-      return {
-        symbol: String(symbol),
-        name: String(name),
-        decimals: Number(decimals),
-        address: tokenAddress,
-        isDetected: true,
-        isNative: false,
-      };
-    }
-  } catch {}
+      // Fallback: Try token() -> 0xfc0c5465
+      if (!tokenAddress) {
+        try {
+          const tokenRes = await provider.call({ to: vaultAddress, data: '0xfc0c5465' });
+          if (tokenRes && tokenRes !== '0x' && tokenRes.length >= 66) {
+            const addr = '0x' + tokenRes.slice(-40);
+            if (ethers.isAddress(addr) && addr !== ethers.ZeroAddress) {
+              tokenAddress = ethers.getAddress(addr);
+            }
+          }
+        } catch {}
+      }
+
+      if (tokenAddress) {
+        const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+        const [symbol, name, decimals] = await Promise.all([
+          tokenContract.symbol().catch(() => 'TOKEN'),
+          tokenContract.name().catch(() => 'Vault Token'),
+          tokenContract.decimals().catch(() => 6),
+        ]);
+        return {
+          symbol: String(symbol),
+          name: String(name),
+          decimals: Number(decimals),
+          address: tokenAddress,
+          isDetected: true,
+          isNative: false,
+        };
+      }
+    } catch {}
+  }
   return null;
 }
 
@@ -166,11 +175,14 @@ function getActiveVaultAsset(targetVault: Vault, evmConf: EvmConfig): VaultAsset
     const matched = available.find((a) => a.symbol === targetVault.selectedAssetSymbol);
     if (matched) return matched;
   }
+  if (targetVault.detectedAsset) {
+    return targetVault.detectedAsset;
+  }
   if (targetVault.tokenSymbol) {
     const matched = available.find((a) => a.symbol === targetVault.tokenSymbol);
     if (matched) return matched;
   }
-  return available.find((a) => a.isDetected) || available[0]!;
+  return available[0]!;
 }
 
 type AutomationStatus = 'stopped' | 'running' | 'paused';
@@ -627,6 +639,38 @@ export default function Home() {
       clearTimeout(timer);
     };
   }, [newVaultAddress, newVaultChain]);
+
+  // Dynamically auto-detect accepted token for currently selected vault if it doesn't have detectedAsset yet
+  useEffect(() => {
+    if (vault?.chainType !== 'erc' || !vault?.address || !/^0x[0-9a-fA-F]{40}$/.test(vault.address) || vault.detectedAsset) {
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const detected = await detectVaultAsset(vault.address, evmConfigRef.current);
+        if (active && detected) {
+          setVaults((cur) =>
+            cur.map((v, i) =>
+              i === selectedVault
+                ? {
+                    ...v,
+                    detectedAsset: detected,
+                    tokenSymbol: detected.symbol,
+                    tokenDecimals: detected.decimals,
+                    tokenAddress: detected.address,
+                    selectedAssetSymbol: v.selectedAssetSymbol || detected.symbol,
+                  }
+                : v
+            )
+          );
+        }
+      } catch {}
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedVault, vault?.address, vault?.chainType, vault?.detectedAsset]);
 
   const selectedHistory = useMemo(() => history.filter((entry) => entry.vaultIndex === selectedVault && (historyFilter === 'All' || entry.status === historyFilter)), [history, historyFilter, selectedVault]);
   const successfulHistory = history.filter((entry) => entry.vaultIndex === selectedVault && entry.status === 'Success');
@@ -1393,8 +1437,8 @@ export default function Home() {
 
     setSavingVault(true);
     try {
-      const symbol = newVaultSymbol.trim() || (newVaultChain === 'erc' ? 'ETH' : 'ZIG');
-      const decimals = newVaultDecimals.trim() ? Number(newVaultDecimals) : (newVaultChain === 'erc' ? 18 : 6);
+      const symbol = newVaultSymbol.trim() || detectedAddVaultAsset?.symbol || (newVaultChain === 'erc' ? 'ETH' : 'ZIG');
+      const decimals = newVaultDecimals.trim() ? Number(newVaultDecimals) : (detectedAddVaultAsset?.decimals ?? (newVaultChain === 'erc' ? 18 : 6));
       const summary = newVaultSummary.trim() || `${newVaultChain === 'erc' ? 'ERC / EVM' : 'ZIGChain'} custom automated vault strategy`;
 
       let createdId = `custom-${unixNow()}`;
@@ -1429,7 +1473,7 @@ export default function Home() {
         tokenDecimals: decimals,
         tokenAddress: detectedAddVaultAsset?.address,
         detectedAsset: detectedAddVaultAsset || undefined,
-        selectedAssetSymbol: symbol,
+        selectedAssetSymbol: detectedAddVaultAsset?.symbol || symbol,
       };
 
       const updatedVaults = [...vaults, newVault];
