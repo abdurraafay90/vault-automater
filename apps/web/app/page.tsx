@@ -90,7 +90,7 @@ const intervals = [
   { label: '15m', value: 900 }, { label: '30m', value: 1800 }, { label: '60m', value: 3600 },
 ];
 
-const API_URL = 'http://localhost:4000';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 const GAS_MULTIPLIER = 1.5;
 const BIGINT_ZERO = BigInt(0);
 const BIGINT_ONE = BigInt(1);

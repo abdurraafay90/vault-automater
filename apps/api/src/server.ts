@@ -11,8 +11,14 @@ const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info', redact: 
 
 await app.register(helmet);
 await app.register(cookie);
-await app.register(cors, { origin: config.APP_ORIGIN, credentials: true });
+await app.register(cors, {
+  origin: (origin, cb) => {
+    cb(null, true);
+  },
+  credentials: true,
+});
 await app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
+
 
 const SESSION_COOKIE = 'vaultflow_session';
 const requestUsers = new WeakMap<object, AuthUser>();

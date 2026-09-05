@@ -41,6 +41,7 @@ services:
     env_file: .env
     environment:
       NODE_ENV: production
+      BACKEND_API_URL: http://api:4000
     ports: ["4560:4560"]
     depends_on:
       - api
