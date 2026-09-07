@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
@@ -28,7 +30,7 @@ function currentUser(request: FastifyRequest) { return requestUsers.get(request)
 
 app.addHook('preHandler', async (request, reply) => {
   const path = request.url.split('?')[0] ?? request.url;
-  if (!path.startsWith('/api/') || path === '/api/auth/login' || path === '/api/config/public' || path.startsWith('/api/vaults/custom')) return;
+  if (!path.startsWith('/api/') || path === '/api/auth/login' || path === '/api/config/public' || path === '/api/csv/template' || path.startsWith('/api/vaults/custom')) return;
 
   const token = request.cookies[SESSION_COOKIE];
   const user = token ? userForSession(token) : null;
@@ -171,6 +173,33 @@ app.get('/api/config/public', async () => ({
   walletModes: ['private-key'],
   backendSignerEnabled: config.BACKEND_SIGNER_ENABLED,
 }));
+
+app.get('/api/csv/template', async (request, reply) => {
+  const query = z.object({ chain: z.enum(['bnb', 'erc', 'ethereum', 'zigchain']).default('bnb') }).safeParse(request.query);
+  const chain = query.success ? query.data.chain : 'bnb';
+  const filename = chain === 'zigchain' ? 'wallets_zigchain.csv' : chain === 'erc' || chain === 'ethereum' ? 'wallets_ethereum.csv' : 'wallets_bnb.csv';
+
+  const possiblePaths = [
+    path.join(process.cwd(), 'data', 'csv', filename),
+    path.join(process.cwd(), '..', '..', 'data', 'csv', filename),
+    path.join('/repo', 'data', 'csv', filename),
+  ];
+
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      const content = fs.readFileSync(p, 'utf8');
+      return reply.type('text/csv').send(content);
+    }
+  }
+
+  const defaults: Record<string, string> = {
+    bnb: `wallet_address,private_key,amount,scheduled_time\n0x12a72647490701848Aa4Ad7fd1AcE0aDc4B12B50,0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a07471195,5.0,2026-09-07 18:00:00\n0xc5323280c2f4212cFCcF5705561a5E759c569e95,0x689af8fd534509c0f2821e6aaa98d1ee04088cb0e0e0ce442721f295610d0a4f,10.0,2026-09-07 18:01:00\n0x388C818CA8B9251b393131C08a73683246A166dd,0xbb88f8fd534509c0f2821e6aaa98d1ee04088cb0e0e0ce442721f295610d0b50,25.0,2026-09-07 18:02:00\n`,
+    erc: `wallet_address,private_key,amount,scheduled_time\n0xc5323280c2f4212cFCcF5705561a5E759c569e95,0x689af8fd534509c0f2821e6aaa98d1ee04088cb0e0e0ce442721f295610d0a4f,20.0,2026-09-07 18:00:00\n0x12a72647490701848Aa4Ad7fd1AcE0aDc4B12B50,0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a07471195,15.0,2026-09-07 18:01:00\n0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF,0x789af8fd534509c0f2821e6aaa98d1ee04088cb0e0e0ce442721f295610d0c61,30.0,2026-09-07 18:02:00\n`,
+    zigchain: `wallet_address,private_key,amount,scheduled_time\nzig1n3cmvsccl7z3fjcvzpjww3mshfz3tuclxs3ytx,0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a07471195,10.0,2026-09-07 18:00:00\nzig1wx9ajrpwvu69ykw93fd7vdlxzc4rakyvq7202x,0x689af8fd534509c0f2821e6aaa98d1ee04088cb0e0e0ce442721f295610d0a4f,25.0,2026-09-07 18:01:00\n`,
+  };
+  const key = chain === 'zigchain' ? 'zigchain' : chain === 'erc' || chain === 'ethereum' ? 'erc' : 'bnb';
+  return reply.type('text/csv').send(defaults[key]);
+});
 
 app.get('/api/wallet/:address/balance', async (request, reply) => {
   const params = z.object({ address: z.string().regex(/^zig1[0-9a-z]{38,62}$/) }).safeParse(request.params);

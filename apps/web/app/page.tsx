@@ -18,6 +18,7 @@ export type VaultAsset = {
   address?: string;
   isNative?: boolean;
   isDetected?: boolean;
+  isCustom?: boolean;
 };
 
 export type Vault = {
@@ -40,6 +41,17 @@ export type Vault = {
   customAsset?: VaultAsset | null;
   evmNetwork?: 'mainnet' | 'testnet';
 };
+
+export interface CsvWalletQueueItem {
+  id: string;
+  address: string;
+  privateKey: string;
+  amount: string;
+  scheduledTime?: string;
+  status: 'Pending' | 'Approving' | 'Depositing' | 'Success' | 'Failed';
+  txHash?: string;
+  error?: string;
+}
 
 type ChainConfig = { name: string; id: string; rpcUrl: string; apiUrl: string; explorerUrl: string };
 type EvmConfig = {
@@ -76,6 +88,11 @@ const ERC20_ABI = [
   'function approve(address spender, uint256 amount) returns (bool)',
 ];
 
+const VAULT_DEPOSIT_ABI = [
+  'function deposit(uint256 amount) returns (uint256)',
+  'function deposit(uint256 assets, address receiver) returns (uint256)',
+];
+
 // Presets for Ethereum Mainnet (Chain ID 1)
 const MAINNET_USDT: VaultAsset = { symbol: 'USDT', name: 'Tether USD', address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', decimals: 6, isDetected: true };
 const MAINNET_USDC: VaultAsset = { symbol: 'USDC', name: 'USD Coin', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 };
@@ -91,16 +108,19 @@ const SEPOLIA_ETH: VaultAsset = { symbol: 'ETH', name: 'Sepolia Ether', decimals
 const NATIVE_BNB: VaultAsset = { symbol: 'BNB', name: 'BNB Native Gas', decimals: 18, isNative: true };
 const TESTNET_BNB: VaultAsset = { symbol: 'tBNB', name: 'BNB Testnet Gas', decimals: 18, isNative: true };
 const BSC_MAINNET_USDT: VaultAsset = { symbol: 'USDT', name: 'Binance-Peg BSC-USD', address: '0x55d398326f99059fF775485246999027B3197955', decimals: 18, isDetected: true };
+const BSC_MAINNET_USDC: VaultAsset = { symbol: 'USDC', name: 'Binance-Peg USD Coin', address: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', decimals: 18 };
 const BSC_TESTNET_USDT: VaultAsset = { symbol: 'USDT', name: 'BSC Testnet USDT', address: '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd', decimals: 18, isDetected: true };
+const BSC_TESTNET_USDC: VaultAsset = { symbol: 'USDC', name: 'BSC Testnet USDC', address: '0x64544969ed7EBf5f083679233325356EbE738930', decimals: 18 };
 
 // Presets for ZIGChain
 const ZIGCHAIN_USDC: VaultAsset = { symbol: 'USDC', name: 'Noble USDC', decimals: 6, isDetected: true };
+const ZIGCHAIN_USDT: VaultAsset = { symbol: 'USDT', name: 'Tether USD (IBC)', decimals: 6 };
 const ZIGCHAIN_ZIG: VaultAsset = { symbol: 'ZIG', name: 'ZIG Native Gas', decimals: 6, isNative: true };
 
 async function inspectErc20Token(tokenAddress: string, evmConf?: EvmConfig): Promise<VaultAsset | null> {
   if (!tokenAddress || !/^0x[0-9a-fA-F]{40}$/.test(tokenAddress.trim())) return null;
   const cleanAddr = ethers.getAddress(tokenAddress.trim());
-  if (cleanAddr.toLowerCase() === SEPOLIA_MUSDC.address.toLowerCase()) {
+  if (SEPOLIA_MUSDC.address && cleanAddr.toLowerCase() === SEPOLIA_MUSDC.address.toLowerCase()) {
     return SEPOLIA_MUSDC;
   }
   const urls = [
@@ -185,7 +205,7 @@ async function detectVaultAsset(vaultAddress: string, evmConf?: EvmConfig): Prom
       }
 
       if (tokenAddress) {
-        if (tokenAddress.toLowerCase() === SEPOLIA_MUSDC.address.toLowerCase()) {
+        if (SEPOLIA_MUSDC.address && tokenAddress.toLowerCase() === SEPOLIA_MUSDC.address.toLowerCase()) {
           return { ...SEPOLIA_MUSDC, isDetected: true };
         }
         const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
@@ -209,15 +229,6 @@ async function detectVaultAsset(vaultAddress: string, evmConf?: EvmConfig): Prom
 }
 
 function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig, dynamicAssets: VaultAsset[] = []): VaultAsset[] {
-  if (targetVault.chainType === 'zigchain') {
-    return [ZIGCHAIN_USDC];
-  }
-
-  const isSepolia = targetVault.evmNetwork === 'testnet'
-    ? true
-    : targetVault.evmNetwork === 'mainnet'
-    ? false
-    : (evmConf.chainId === 11155111 || evmConf.rpcUrl.includes('sepolia'));
   const list: VaultAsset[] = [];
 
   // If vault has an auto-detected asset, prioritize it at the top
@@ -243,35 +254,57 @@ function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig, dyna
     list.push(targetVault.customAsset);
   }
 
-  // If vault explicitly specified a tokenSymbol (e.g. mUSDC or BNB) but it wasn't added yet
-  if (targetVault.tokenSymbol && !list.some((existing) => existing.symbol.toLowerCase() === targetVault.tokenSymbol?.toLowerCase())) {
-    if (targetVault.chainType === 'bnb' && targetVault.tokenSymbol.toLowerCase() === 'bnb') {
-      list.push(targetVault.evmNetwork === 'testnet' ? TESTNET_BNB : NATIVE_BNB);
-    } else if (isSepolia && targetVault.tokenSymbol.toLowerCase() === 'musdc') {
-      list.push(SEPOLIA_MUSDC);
-    } else {
-      list.push({
-        symbol: targetVault.tokenSymbol,
-        name: `${targetVault.tokenSymbol} (Vault Token)`,
-        decimals: targetVault.tokenDecimals ?? (targetVault.chainType === 'bnb' ? 18 : 6),
-        address: targetVault.tokenAddress,
-      });
+  if (targetVault.chainType === 'zigchain') {
+    // Make USDT and USDC standard defaults for ZIGChain
+    if (!list.some((a) => a.symbol === 'USDC')) list.push(ZIGCHAIN_USDC);
+    if (!list.some((a) => a.symbol === 'USDT')) list.push(ZIGCHAIN_USDT);
+    if (!list.some((a) => a.symbol === 'ZIG')) list.push(ZIGCHAIN_ZIG);
+    return list;
+  }
+
+  // EVM chains: Ethereum / EVM and BNB Chain
+  const isSepolia = targetVault.evmNetwork === 'testnet'
+    ? true
+    : targetVault.evmNetwork === 'mainnet'
+    ? false
+    : (evmConf.chainId === 11155111 || evmConf.rpcUrl.includes('sepolia'));
+
+  if (targetVault.chainType === 'bnb') {
+    const isBscTestnet = targetVault.evmNetwork === 'testnet' || evmConf.chainId === 97;
+    const defaultUsdt = isBscTestnet ? BSC_TESTNET_USDT : BSC_MAINNET_USDT;
+    const defaultUsdc = isBscTestnet ? BSC_TESTNET_USDC : BSC_MAINNET_USDC;
+    if (!list.some((a) => a.symbol === 'USDT')) list.push(defaultUsdt);
+    if (!list.some((a) => a.symbol === 'USDC')) list.push(defaultUsdc);
+    if (!list.some((a) => a.symbol === 'BNB' || a.symbol === 'tBNB')) {
+      list.push(isBscTestnet ? TESTNET_BNB : NATIVE_BNB);
     }
+  } else {
+    // Ethereum / EVM
+    const defaultUsdt = isSepolia ? SEPOLIA_USDT : MAINNET_USDT;
+    const defaultUsdc = isSepolia
+      ? (targetVault.tokenSymbol?.toLowerCase() === 'musdc' ? SEPOLIA_MUSDC : SEPOLIA_USDC)
+      : MAINNET_USDC;
+    if (!list.some((a) => a.symbol === 'USDT')) list.push(defaultUsdt);
+    if (!list.some((a) => a.symbol === 'USDC' || a.symbol === 'mUSDC')) list.push(defaultUsdc);
+    if (!list.some((a) => a.symbol === 'ETH')) {
+      list.push(isSepolia ? SEPOLIA_ETH : NATIVE_ETH);
+    }
+  }
+
+  // If vault explicitly specified another tokenSymbol, ensure it's present
+  if (targetVault.tokenSymbol && !list.some((existing) => existing.symbol.toLowerCase() === targetVault.tokenSymbol?.toLowerCase())) {
+    list.push({
+      symbol: targetVault.tokenSymbol,
+      name: `${targetVault.tokenSymbol} (Vault Token)`,
+      decimals: targetVault.tokenDecimals ?? (targetVault.chainType === 'bnb' ? 18 : 6),
+      address: targetVault.tokenAddress,
+    });
   }
 
   // Add any dynamically discovered wallet assets with positive balance
   for (const item of dynamicAssets) {
     if (!list.some((existing) => existing.symbol.toLowerCase() === item.symbol.toLowerCase() || (item.address && existing.address?.toLowerCase() === item.address?.toLowerCase()))) {
       list.push(item);
-    }
-  }
-
-  // Fallback if list is empty
-  if (list.length === 0) {
-    if (targetVault.chainType === 'bnb') {
-      list.push(targetVault.evmNetwork === 'testnet' ? TESTNET_BNB : NATIVE_BNB);
-    } else {
-      list.push(isSepolia ? SEPOLIA_ETH : NATIVE_ETH);
     }
   }
 
@@ -722,6 +755,33 @@ function hasValidRange(settings: Automation, decimals = defaultTokenConfig.decim
   }
 }
 
+function parseWalletCsv(text: string): CsvWalletQueueItem[] {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  if (lines.length === 0) return [];
+
+  const items: CsvWalletQueueItem[] = [];
+  const firstLineLower = lines[0].toLowerCase();
+  const startIndex = firstLineLower.includes('wallet_address') || firstLineLower.includes('address') || firstLineLower.includes('wallet') ? 1 : 0;
+
+  for (let i = startIndex; i < lines.length; i++) {
+    const rawCols = lines[i].split(',').map((col) => col.trim().replace(/^["']|["']$/g, ''));
+    if (rawCols.length >= 3) {
+      const [address, privateKey, amount, scheduledTime] = rawCols;
+      if (address && privateKey && amount) {
+        items.push({
+          id: `csv-${i}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          address,
+          privateKey,
+          amount,
+          scheduledTime: scheduledTime || undefined,
+          status: 'Pending',
+        });
+      }
+    }
+  }
+  return items;
+}
+
 export default function Home() {
   const [vaults, setVaults] = useState<Vault[]>(defaultVaults);
   const [chainConfig, setChainConfig] = useState<ChainConfig>(defaultChainConfig);
@@ -781,6 +841,16 @@ export default function Home() {
   const [vaultToDelete, setVaultToDelete] = useState<{ index: number; vault: Vault } | null>(null);
   const [deletingVault, setDeletingVault] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+
+  // CSV Batch Wallets State
+  const [signerMode, setSignerMode] = useState<'single' | 'csv'>('single');
+  const [csvQueue, setCsvQueue] = useState<CsvWalletQueueItem[]>([]);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchActiveIndex, setBatchActiveIndex] = useState<number | null>(null);
+  const [csvLoading, setCsvLoading] = useState(false);
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const batchCancelRef = useRef(false);
+  const csvFileInputRef = useRef<HTMLInputElement>(null);
 
   const secretInputRef = useRef<HTMLInputElement>(null);
   const signersRef = useRef<Record<number, UniversalSigner | null>>({});
@@ -916,7 +986,7 @@ export default function Home() {
     void (async () => {
       try {
         const vaultEvm = getVaultEvmConfig(vault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
-        const detected = await detectVaultAsset(vault.address, vaultEvm);
+        const detected = await detectVaultAsset(vault.address!, vaultEvm);
         if (active && detected) {
           setVaults((cur) =>
             cur.map((v, i) =>
@@ -1110,7 +1180,7 @@ export default function Home() {
       } catch {}
 
       const allVaultsRaw = [...baseVaults, ...customVaults];
-      const allVaultsFiltered = allVaultsRaw.filter((v) => !deletedVaultIds.includes(v.id));
+      const allVaultsFiltered = allVaultsRaw.filter((v) => !v.id || !deletedVaultIds.includes(v.id));
       const allVaults = allVaultsFiltered.length > 0 ? allVaultsFiltered : baseVaults;
 
       chainConfigRef.current = nextChainConfig;
@@ -1210,7 +1280,7 @@ export default function Home() {
                 for (const tb of nonZero) {
                   try {
                     const cAddr = ethers.getAddress(tb.contractAddress);
-                    if (cAddr.toLowerCase() === SEPOLIA_MUSDC.address.toLowerCase()) {
+                    if (SEPOLIA_MUSDC.address && cAddr.toLowerCase() === SEPOLIA_MUSDC.address.toLowerCase()) {
                       found.push(SEPOLIA_MUSDC);
                     } else {
                       const inspected = await inspectErc20Token(cAddr, vaultEvm);
@@ -1593,23 +1663,48 @@ export default function Home() {
 
         let txHash = '';
 
+        // Check if vault target is a contract or EOA
+        let isContract = false;
+        try {
+          const code = await universalSigner.provider.getCode(target.address);
+          isContract = Boolean(code && code !== '0x' && code !== '0x0');
+        } catch {}
+
         if (activeAsset.isNative || !activeAsset.address) {
-          // Native ETH / BNB transfer
+          // Native ETH / BNB transfer or contract deposit
           if (gasBalanceWei !== null) {
             if (gasBalanceWei < amount) {
               throw new Error(`Insufficient balance: Current balance (${formatBaseUnits(gasBalanceWei, decimals)} ${symbol}) is less than transfer amount (${formatBaseUnits(amount, decimals)} ${symbol}).`);
             }
           }
 
-          const tx = await universalSigner.wallet.sendTransaction({
-            to: target.address,
-            value: amount,
-          });
-          const receipt = await tx.wait(1);
-          if (!receipt || receipt.status === 0) throw new Error(`${target.chainType === 'bnb' ? 'BNB Chain' : 'EVM'} transaction was reverted by the network.`);
-          txHash = tx.hash;
+          if (isContract) {
+            try {
+              const vaultContract = new ethers.Contract(target.address, VAULT_DEPOSIT_ABI, universalSigner.wallet);
+              const tx = await vaultContract['deposit(uint256)'](amount, { value: amount });
+              const receipt = await tx.wait(1);
+              if (!receipt || receipt.status === 0) throw new Error(`${target.chainType === 'bnb' ? 'BNB Chain' : 'EVM'} transaction was reverted by the network.`);
+              txHash = tx.hash;
+            } catch {
+              const tx = await universalSigner.wallet.sendTransaction({
+                to: target.address,
+                value: amount,
+              });
+              const receipt = await tx.wait(1);
+              if (!receipt || receipt.status === 0) throw new Error(`${target.chainType === 'bnb' ? 'BNB Chain' : 'EVM'} transaction was reverted by the network.`);
+              txHash = tx.hash;
+            }
+          } else {
+            const tx = await universalSigner.wallet.sendTransaction({
+              to: target.address,
+              value: amount,
+            });
+            const receipt = await tx.wait(1);
+            if (!receipt || receipt.status === 0) throw new Error(`${target.chainType === 'bnb' ? 'BNB Chain' : 'EVM'} transaction was reverted by the network.`);
+            txHash = tx.hash;
+          }
         } else {
-          // ERC-20 / BEP-20 token transfer (USDT, USDC, etc.)
+          // ERC-20 / BEP-20 token deposit (0xb6b55f25) or transfer (USDT, USDC, mUSDC, etc.)
           const tokenContract = new ethers.Contract(activeAsset.address, ERC20_ABI, universalSigner.wallet);
 
           let tokenBal: bigint | null = null;
@@ -1626,10 +1721,47 @@ export default function Home() {
             }
           }
 
-          const tx = await tokenContract.transfer(target.address, amount);
-          const receipt = await tx.wait(1);
-          if (!receipt || receipt.status === 0) throw new Error(`${symbol} transfer was reverted by the network.`);
-          txHash = tx.hash;
+          if (isContract) {
+            // Check allowance first and approve if insufficient
+            let allowance: bigint = 0n;
+            try {
+              allowance = await tokenContract.allowance(universalSigner.wallet.address, target.address);
+            } catch {}
+
+            if (allowance < amount) {
+              setTransferStatus({ kind: 'success', message: `Approving ${symbol} spending for vault contract…` });
+              const approveTx = await tokenContract.approve(target.address, ethers.MaxUint256);
+              const approveReceipt = await approveTx.wait(1);
+              if (!approveReceipt || approveReceipt.status === 0) {
+                throw new Error(`Token approval for ${symbol} failed.`);
+              }
+            }
+
+            // Call deposit(0xb6b55f25)
+            const vaultContract = new ethers.Contract(target.address, VAULT_DEPOSIT_ABI, universalSigner.wallet);
+            let depositSent = false;
+            try {
+              const tx = await vaultContract['deposit(uint256)'](amount);
+              const receipt = await tx.wait(1);
+              if (!receipt || receipt.status === 0) throw new Error(`Vault deposit(uint256) was reverted by the network.`);
+              txHash = tx.hash;
+              depositSent = true;
+            } catch (contractErr: any) {
+              console.warn('deposit(uint256) reverted, falling back to token transfer:', contractErr);
+            }
+
+            if (!depositSent) {
+              const tx = await tokenContract.transfer(target.address, amount);
+              const receipt = await tx.wait(1);
+              if (!receipt || receipt.status === 0) throw new Error(`${symbol} transfer was reverted by the network.`);
+              txHash = tx.hash;
+            }
+          } else {
+            const tx = await tokenContract.transfer(target.address, amount);
+            const receipt = await tx.wait(1);
+            if (!receipt || receipt.status === 0) throw new Error(`${symbol} transfer was reverted by the network.`);
+            txHash = tx.hash;
+          }
         }
 
         if (generation !== (sessionGenerationRef.current[index] ?? 0)) return true;
@@ -1808,6 +1940,257 @@ export default function Home() {
       const symbol = target?.tokenSymbol ?? (target?.chainType === 'bnb' ? 'BNB' : target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
       setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
     }
+  }
+
+  async function loadDefaultChainCsv(targetVault: Vault) {
+    setCsvLoading(true);
+    setCsvError(null);
+    try {
+      const chainParam = targetVault.chainType === 'zigchain' ? 'zigchain' : targetVault.chainType === 'bnb' ? 'bnb' : 'erc';
+      const res = await fetch(`/api/csv/template?chain=${chainParam}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to load CSV template`);
+      const text = await res.text();
+      const items = parseWalletCsv(text);
+      if (items.length === 0) throw new Error('No valid wallet rows found in CSV template');
+      setCsvQueue(items);
+    } catch (err: any) {
+      setCsvError(err?.message || 'Failed to load default CSV template');
+    } finally {
+      setCsvLoading(false);
+    }
+  }
+
+  function handleCsvFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setCsvLoading(true);
+    setCsvError(null);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = (e.target?.result as string) || '';
+        const items = parseWalletCsv(text);
+        if (items.length === 0) throw new Error('No valid wallet rows found in uploaded CSV file');
+        setCsvQueue(items);
+      } catch (err: any) {
+        setCsvError(err?.message || 'Failed to parse uploaded CSV');
+      } finally {
+        setCsvLoading(false);
+      }
+    };
+    reader.onerror = () => {
+      setCsvError('Failed to read uploaded file');
+      setCsvLoading(false);
+    };
+    reader.readAsText(file);
+    if (event.target) event.target.value = '';
+  }
+
+  async function startBatchAutomation() {
+    if (batchRunning) return;
+    const target = vaultsRef.current[selectedVault];
+    if (!target?.address || target.address === 'Not configured') {
+      setTransferStatus({ kind: 'error', message: 'Vault address is not configured.' });
+      return;
+    }
+    if (csvQueue.length === 0) {
+      setTransferStatus({ kind: 'error', message: 'CSV queue is empty. Load template or upload a CSV file first.' });
+      return;
+    }
+
+    const currentAuto = automationsRef.current[selectedVault];
+    const intervalSec = (currentAuto?.interval && currentAuto.interval >= 1) ? currentAuto.interval : 2;
+    const delayMs = intervalSec * 1000;
+
+    batchCancelRef.current = false;
+    setBatchRunning(true);
+    setTransferStatus(null);
+
+    const vaultEvm = isEvmChain(target.chainType)
+      ? getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current)
+      : null;
+    const activeAsset = vaultEvm ? getActiveVaultAsset(target, vaultEvm, walletDiscoveredAssetsRef.current) : null;
+    const decimals = activeAsset?.decimals ?? (target.tokenDecimals ?? (target.chainType === 'bnb' ? 18 : 6));
+    const symbol = activeAsset?.symbol ?? (target.tokenSymbol ?? (target.chainType === 'bnb' ? 'BNB' : target.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol));
+
+    for (let i = 0; i < csvQueue.length; i++) {
+      if (batchCancelRef.current) break;
+
+      const item = csvQueue[i];
+      if (item.status === 'Success') continue;
+
+      setBatchActiveIndex(i);
+      setCsvQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'Depositing', error: undefined } : q));
+
+      const startedAt = unixNow();
+      const historyId = `${startedAt}-batch-${i}-${crypto.randomUUID()}`;
+
+      try {
+        let amountBaseUnits: bigint;
+        try {
+          amountBaseUnits = parseTokenAmount(item.amount.trim(), decimals);
+        } catch {
+          const parsedFloat = parseFloat(item.amount.trim());
+          if (Number.isNaN(parsedFloat) || parsedFloat <= 0) throw new Error(`Invalid amount '${item.amount}'`);
+          amountBaseUnits = BigInt(Math.floor(parsedFloat * 10 ** decimals));
+        }
+
+        const historyEntry: HistoryEntry = {
+          id: historyId,
+          vaultIndex: selectedVault,
+          time: startedAt,
+          amountBaseUnits,
+          status: 'Pending',
+          source: 'Automation',
+        };
+        setHistory((curr) => [historyEntry, ...curr].slice(0, 100));
+
+        let txHash = '';
+
+        if (isEvmChain(target.chainType)) {
+          if (!vaultEvm) throw new Error('EVM configuration missing');
+          const provider = new ethers.JsonRpcProvider(vaultEvm.rpcUrl);
+
+          let cleanKey = item.privateKey.trim();
+          if (!cleanKey.startsWith('0x') && cleanKey.length === 64) {
+            cleanKey = `0x${cleanKey}`;
+          }
+          const wallet = new ethers.Wallet(cleanKey, provider);
+
+          // Pre-flight gas check
+          const gasBal = await provider.getBalance(wallet.address);
+          const gasSymbol = target.chainType === 'bnb' ? (vaultEvm.chainId === 97 ? 'tBNB' : 'BNB') : 'ETH';
+          if (gasBal === 0n) {
+            throw new Error(`Insufficient gas: ${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)} has 0 ${gasSymbol}`);
+          }
+
+          const code = await provider.getCode(target.address);
+          const isContract = Boolean(code && code !== '0x' && code !== '0x0');
+
+          if (activeAsset?.isNative || !activeAsset?.address) {
+            // Native ETH / BNB transfer or contract deposit
+            if (gasBal < amountBaseUnits) {
+              throw new Error(`Insufficient balance: Gas balance < ${item.amount} ${symbol}`);
+            }
+            if (isContract) {
+              try {
+                const vaultContract = new ethers.Contract(target.address, VAULT_DEPOSIT_ABI, wallet);
+                const tx = await vaultContract['deposit(uint256)'](amountBaseUnits, { value: amountBaseUnits });
+                const receipt = await tx.wait(1);
+                if (!receipt || receipt.status === 0) throw new Error('Contract deposit reverted');
+                txHash = tx.hash;
+              } catch {
+                const tx = await wallet.sendTransaction({ to: target.address, value: amountBaseUnits });
+                const receipt = await tx.wait(1);
+                if (!receipt || receipt.status === 0) throw new Error('Native transfer reverted');
+                txHash = tx.hash;
+              }
+            } else {
+              const tx = await wallet.sendTransaction({ to: target.address, value: amountBaseUnits });
+              const receipt = await tx.wait(1);
+              if (!receipt || receipt.status === 0) throw new Error('Native transfer reverted');
+              txHash = tx.hash;
+            }
+          } else {
+            // ERC-20 / BEP-20 token deposit (0xb6b55f25) or transfer (USDT, USDC, etc.)
+            const tokenContract = new ethers.Contract(activeAsset.address, ERC20_ABI, wallet);
+            const tokenBal: bigint = await tokenContract.balanceOf(wallet.address);
+            if (tokenBal < amountBaseUnits) {
+              throw new Error(`Insufficient ${symbol}: balance (${formatBaseUnits(tokenBal, decimals)}) < ${item.amount}`);
+            }
+
+            if (isContract) {
+              // Pre-flight check allowance
+              const allowance: bigint = await tokenContract.allowance(wallet.address, target.address);
+              if (allowance < amountBaseUnits) {
+                setCsvQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'Approving' } : q));
+                const approveTx = await tokenContract.approve(target.address, ethers.MaxUint256);
+                const approveReceipt = await approveTx.wait(1);
+                if (!approveReceipt || approveReceipt.status === 0) {
+                  throw new Error(`Token approval for ${symbol} failed`);
+                }
+              }
+
+              setCsvQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'Depositing' } : q));
+              const vaultContract = new ethers.Contract(target.address, VAULT_DEPOSIT_ABI, wallet);
+              let depositSent = false;
+              try {
+                const tx = await vaultContract['deposit(uint256)'](amountBaseUnits);
+                const receipt = await tx.wait(1);
+                if (!receipt || receipt.status === 0) throw new Error(`Vault deposit(uint256) was reverted`);
+                txHash = tx.hash;
+                depositSent = true;
+              } catch (depErr: any) {
+                console.warn('deposit(uint256) reverted in batch, falling back to token transfer:', depErr);
+              }
+
+              if (!depositSent) {
+                const tx = await tokenContract.transfer(target.address, amountBaseUnits);
+                const receipt = await tx.wait(1);
+                if (!receipt || receipt.status === 0) throw new Error(`${symbol} transfer was reverted`);
+                txHash = tx.hash;
+              }
+            } else {
+              const tx = await tokenContract.transfer(target.address, amountBaseUnits);
+              const receipt = await tx.wait(1);
+              if (!receipt || receipt.status === 0) throw new Error(`${symbol} transfer was reverted`);
+              txHash = tx.hash;
+            }
+          }
+        } else {
+          // Cosmos / ZIGChain batch deposit
+          let cleanKey = item.privateKey.trim();
+          if (cleanKey.startsWith('0x')) cleanKey = cleanKey.slice(2);
+          const cosmosWallet = await DirectSecp256k1Wallet.fromKey(Buffer.from(cleanKey, 'hex'), 'zig');
+          const [account] = await cosmosWallet.getAccounts();
+          const client = await SigningStargateClient.connectWithSigner(
+            chainConfigRef.current.rpcUrl,
+            cosmosWallet,
+            { gasPrice: GasPrice.fromString(`0.025${nativeTokenRef.current.denom}`) }
+          );
+
+          if (target.address.startsWith('zig1')) {
+            const sendResult = await client.sendTokens(
+              account.address,
+              target.address,
+              [coin(amountBaseUnits.toString(), transferTokenRef.current.denom)],
+              GAS_MULTIPLIER
+            );
+            if (sendResult.code !== 0) throw new Error(sendResult.rawLog || `Code ${sendResult.code}`);
+            txHash = sendResult.transactionHash;
+          } else {
+            const ibcResult = await client.signAndBroadcast(
+              account.address,
+              [buildIbcTransferMessage(account.address, target.address, amountBaseUnits)],
+              GAS_MULTIPLIER
+            );
+            if (ibcResult.code !== 0) throw new Error(ibcResult.rawLog || `Code ${ibcResult.code}`);
+            txHash = ibcResult.transactionHash;
+          }
+        }
+
+        setCsvQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'Success', txHash } : q));
+        setHistory((curr) => curr.map((h) => h.id === historyId ? { ...h, status: 'Success', hash: txHash } : h));
+      } catch (rowErr: any) {
+        const errorMsg = formatBlockchainError(rowErr, target.chainType, symbol);
+        setCsvQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'Failed', error: errorMsg } : q));
+        setHistory((curr) => curr.map((h) => h.id === historyId ? { ...h, status: 'Failed', error: errorMsg } : h));
+      }
+
+      // Interval pacing between wallet executions
+      if (i < csvQueue.length - 1 && !batchCancelRef.current) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+
+    setBatchRunning(false);
+    setBatchActiveIndex(null);
+  }
+
+  function stopBatchAutomation() {
+    batchCancelRef.current = true;
+    setBatchRunning(false);
+    setBatchActiveIndex(null);
   }
 
   function updateSelectedAutomation(patch: Partial<Automation>) { patchAutomation(selectedVault, patch); }
@@ -2006,7 +2389,7 @@ export default function Home() {
 
       try {
         const deletedVaultIds = JSON.parse(localStorage.getItem('vaultflow_deleted_vaults') || '[]') as string[];
-        if (!deletedVaultIds.includes(targetVault.id)) {
+        if (targetVault.id && !deletedVaultIds.includes(targetVault.id)) {
           deletedVaultIds.push(targetVault.id);
           localStorage.setItem('vaultflow_deleted_vaults', JSON.stringify(deletedVaultIds));
         }
@@ -2081,7 +2464,7 @@ export default function Home() {
     try {
       localStorage.removeItem('vaultflow_deleted_vaults');
     } catch {}
-    void loadConfig();
+    void loadPublicConfig();
   }
 
 
@@ -2089,11 +2472,24 @@ export default function Home() {
   const automatedVaultIndexes = automations.map((item, index) => item.mode === 'automation' ? index : -1).filter((index) => index >= 0);
   const allReady = automatedVaultIndexes.length > 0 && automatedVaultIndexes.every((index) => canAutomate(index));
 
-  const actionHint = !walletSession.source ? 'Enter private key or mnemonic to unlock session.'
-    : !walletSession.hasSigner ? 'The signer is not unlocked for this vault.'
-    : !vault.address || vault.address === 'Not configured' ? 'Configure this vault address first.'
-    : !automation.minimum.trim() ? 'Enter an amount to enable the transfer button.'
-    : !hasValidRange(automation, currentTokenDecimals) ? automation.mode === 'automation' ? 'Check the amount range and use a frequency of at least 1 second.' : `Enter a valid ${currentTokenSymbol} amount.`
+  const actionHint = signerMode === 'csv'
+    ? (!vault.address || vault.address === 'Not configured'
+      ? 'Configure this vault address first.'
+      : csvQueue.length === 0
+      ? 'Load default chain CSV or upload a wallet CSV file to begin batch deposits.'
+      : '')
+    : !walletSession.source
+    ? 'Enter private key or mnemonic to unlock session.'
+    : !walletSession.hasSigner
+    ? 'The signer is not unlocked for this vault.'
+    : !vault.address || vault.address === 'Not configured'
+    ? 'Configure this vault address first.'
+    : !automation.minimum.trim()
+    ? 'Enter an amount to enable the transfer button.'
+    : !hasValidRange(automation, currentTokenDecimals)
+    ? automation.mode === 'automation'
+      ? 'Check the amount range and use a frequency of at least 1 second.'
+      : `Enter a valid ${currentTokenSymbol} amount.`
     : '';
 
   if (authLoading) return <main className="auth-shell"><div className="auth-loading"><span className="brand-glyph">V</span><p>Loading Vaultflow…</p></div></main>;
@@ -2665,17 +3061,178 @@ export default function Home() {
         </section>
 
         <section className="two-column">
-          {/* Wallet Card - Private Key Only */}
+          {/* Wallet Card - Single Key or CSV Batch */}
           <article className="console-card wallet-card">
             <div className="card-title">
-              <span className="title-icon blue">▣</span>
+              <span className="title-icon blue">{signerMode === 'csv' ? '☵' : '▣'}</span>
               <div>
-                <h2>Private Key Session</h2>
-                <p>Unlock an interactive signing session in memory for {vault.name}.</p>
+                <h2>{signerMode === 'csv' ? 'CSV Batch Wallets' : 'Private Key Session'}</h2>
+                <p>{signerMode === 'csv' ? `Multi-wallet automated vault deposit queue for ${vault.name}.` : `Unlock an interactive signing session in memory for ${vault.name}.`}</p>
               </div>
             </div>
 
-            {walletSession.source ? (
+            <div className="signer-mode-tabs">
+              <button
+                type="button"
+                className={`signer-tab-btn ${signerMode === 'single' ? 'active' : ''}`}
+                onClick={() => setSignerMode('single')}
+              >
+                ▣ Single Key Session
+              </button>
+              <button
+                type="button"
+                className={`signer-tab-btn ${signerMode === 'csv' ? 'active' : ''}`}
+                onClick={() => setSignerMode('csv')}
+              >
+                ☵ CSV Batch Wallets {csvQueue.length > 0 ? `(${csvQueue.length})` : ''}
+              </button>
+            </div>
+
+            {signerMode === 'csv' ? (
+              <div className="csv-panel">
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  ref={csvFileInputRef}
+                  style={{ display: 'none' }}
+                  onChange={handleCsvFileUpload}
+                />
+                <div className="csv-actions-bar">
+                  <button
+                    type="button"
+                    className="csv-load-template-btn"
+                    onClick={() => void loadDefaultChainCsv(vault)}
+                    disabled={csvLoading || batchRunning}
+                  >
+                    {csvLoading ? 'LOADING…' : `⭳ LOAD DEFAULT ${vault.chainType.toUpperCase()} CSV`}
+                  </button>
+                  <button
+                    type="button"
+                    className="csv-load-template-btn"
+                    onClick={() => csvFileInputRef.current?.click()}
+                    disabled={csvLoading || batchRunning}
+                  >
+                    ↑ UPLOAD CSV
+                  </button>
+                  {csvQueue.length > 0 && (
+                    <button
+                      type="button"
+                      className="csv-clear-btn"
+                      onClick={() => { setCsvQueue([]); setCsvError(null); }}
+                      disabled={batchRunning}
+                    >
+                      CLEAR
+                    </button>
+                  )}
+                </div>
+
+                {csvError && <p className="form-error" role="alert">{csvError}</p>}
+
+                {csvQueue.length === 0 ? (
+                  <div
+                    className="csv-dropzone"
+                    onClick={() => csvFileInputRef.current?.click()}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const file = e.dataTransfer.files?.[0];
+                      if (file) {
+                        const fakeEvent = { target: { files: [file], value: '' } } as any;
+                        handleCsvFileUpload(fakeEvent);
+                      }
+                    }}
+                  >
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="12" y1="18" x2="12" y2="12" />
+                      <line x1="9" y1="15" x2="15" y2="15" />
+                    </svg>
+                    <span className="csv-dropzone-title">Upload Wallets CSV file or load chain default</span>
+                    <span className="csv-dropzone-sub">Columns: wallet_address, private_key, amount, scheduled_time</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="csv-queue-summary">
+                      <span>Total: <strong>{csvQueue.length}</strong></span>
+                      <span>Pending: <strong>{csvQueue.filter((q) => q.status === 'Pending').length}</strong></span>
+                      <span>Success: <strong style={{ color: '#22c55e' }}>{csvQueue.filter((q) => q.status === 'Success').length}</strong></span>
+                      <span>Failed: <strong style={{ color: '#ef4444' }}>{csvQueue.filter((q) => q.status === 'Failed').length}</strong></span>
+                    </div>
+
+                    <div className="csv-queue-scroll">
+                      <table className="csv-table">
+                        <thead>
+                          <tr>
+                            <th>#</th>
+                            <th>WALLET</th>
+                            <th>AMOUNT</th>
+                            <th>SCHEDULE</th>
+                            <th>STATUS</th>
+                            <th>TX / ERROR</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {csvQueue.map((item, idx) => {
+                            const isCurrent = batchActiveIndex === idx;
+                            return (
+                              <tr key={item.id} style={isCurrent ? { background: 'rgba(56, 189, 248, 0.12)' } : undefined}>
+                                <td>{idx + 1}</td>
+                                <td title={item.address}>
+                                  <code>{item.address ? `${item.address.slice(0, 6)}…${item.address.slice(-4)}` : '—'}</code>
+                                </td>
+                                <td><strong>{item.amount} {activeVaultAsset.symbol}</strong></td>
+                                <td><small>{item.scheduledTime || 'Immediate'}</small></td>
+                                <td>
+                                  <span className={`queue-status-badge ${item.status.toLowerCase()}`}>
+                                    {item.status}
+                                  </span>
+                                </td>
+                                <td>
+                                  {item.txHash ? (
+                                    <a
+                                      href={
+                                        isEvmChain(vault.chainType)
+                                          ? `${currentVaultEvmConfig.explorerUrl}/tx/${item.txHash}`
+                                          : `${chainConfig.explorerUrl}/tx/${item.txHash}`
+                                      }
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="tx-hash-link"
+                                      title="View on explorer"
+                                    >
+                                      <code>{item.txHash.slice(0, 8)}…</code>
+                                    </a>
+                                  ) : item.error ? (
+                                    <span style={{ color: '#ef4444' }} title={item.error}>
+                                      <code>{item.error.slice(0, 18)}…</code>
+                                    </span>
+                                  ) : (
+                                    <span>—</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {batchRunning && (
+                      <div className="batch-progress-bar">
+                        <svg className="spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                          <path d="M12 2a10 10 0 0 1 10 10" />
+                        </svg>
+                        <span>
+                          Executing batch: Wallet {(batchActiveIndex ?? 0) + 1} of {csvQueue.length} · Delay: {automation.interval || 2}s
+                        </span>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            ) : walletSession.source ? (
               <div className="connection-panel">
                 <div className="connection-heading">
                   <span className="connection-mark">✓</span>
@@ -2924,7 +3481,12 @@ export default function Home() {
           </div>
 
           <div className="amount-note">
-            <b>Note:</b> {automation.mode === 'once' ? 'Send once transfers exactly the amount entered above.' : 'Each run chooses an amount between minimum and maximum. Failed transactions automatically pause this vault.'} {currentTokenSymbol} uses {currentTokenDecimals} decimals.
+            <b>Note:</b> {signerMode === 'csv'
+              ? `CSV Batch Mode: Deposit amounts are configured per wallet row in the CSV queue (${csvQueue.length} wallets). Transactions invoke deposit(0xb6b55f25) with automatic token approval.`
+              : automation.mode === 'once'
+              ? 'Send once transfers exactly the amount entered above.'
+              : 'Each run chooses an amount between minimum and maximum. Failed transactions automatically pause this vault.'}{' '}
+            {currentTokenSymbol} uses {currentTokenDecimals} decimals.
           </div>
 
           {actionHint && <p className="action-hint">{actionHint}</p>}
@@ -2936,12 +3498,12 @@ export default function Home() {
             </div>
           )}
 
-          <div className={`automation-fields ${automation.mode === 'automation' ? 'expanded' : ''}`} aria-hidden={automation.mode !== 'automation'}>
+          <div className={`automation-fields ${automation.mode === 'automation' || signerMode === 'csv' ? 'expanded' : ''}`} aria-hidden={automation.mode !== 'automation' && signerMode !== 'csv'}>
             <div>
               <div className="frequency-row">
                 <div>
                   <span>EXECUTION FREQUENCY</span>
-                  <small>Choose a preset or set your own interval</small>
+                  <small>{signerMode === 'csv' ? 'Delay between each sequential wallet deposit in queue' : 'Choose a preset or set your own interval'}</small>
                 </div>
                 <div className="frequency-options">
                   {intervals.map((item) => (
@@ -2949,7 +3511,7 @@ export default function Home() {
                       className={!automation.customInterval && automation.interval === item.value ? 'active' : ''}
                       key={item.value}
                       type="button"
-                      disabled={automation.status === 'running'}
+                      disabled={automation.status === 'running' || batchRunning}
                       onClick={() => updateSelectedAutomation({ interval: item.value, customInterval: '' })}
                     >
                       {item.label}
@@ -2961,10 +3523,10 @@ export default function Home() {
                       min="1"
                       step="1"
                       value={automation.customInterval}
-                      disabled={automation.status === 'running' || automation.mode !== 'automation'}
+                      disabled={automation.status === 'running' || batchRunning}
                       onChange={(event) => setCustomFrequency(event.target.value)}
                       placeholder="Custom"
-                      tabIndex={automation.mode === 'automation' ? 0 : -1}
+                      tabIndex={0}
                     />
                     <span>sec</span>
                   </label>
@@ -2975,10 +3537,14 @@ export default function Home() {
 
           <div className="execution-strip">
             <div>
-              <span className={`execution-light ${automation.status}`} />
+              <span className={`execution-light ${signerMode === 'csv' ? (batchRunning ? 'running' : 'stopped') : automation.status}`} />
               <span>
                 <small>CURRENT STATUS</small>
-                <strong>{sendingVaults.includes(selectedVault) ? 'SENDING' : automation.mode === 'once' ? 'READY' : statusLabel}</strong>
+                <strong>
+                  {signerMode === 'csv'
+                    ? (batchRunning ? `BATCH ACTIVE (${(batchActiveIndex ?? 0) + 1}/${csvQueue.length})` : csvQueue.length ? 'BATCH READY' : 'CSV EMPTY')
+                    : (sendingVaults.includes(selectedVault) ? 'SENDING' : automation.mode === 'once' ? 'READY' : statusLabel)}
+                </strong>
               </span>
             </div>
             <div>
@@ -2987,10 +3553,39 @@ export default function Home() {
             </div>
             <div>
               <small>NEXT EXECUTION</small>
-              <strong>{automation.mode === 'once' ? 'Not scheduled' : sendingVaults.includes(selectedVault) ? 'Executing now…' : automation.status === 'running' ? formatCountdown(automation.nextAt, now) : '—'}</strong>
+              <strong>
+                {signerMode === 'csv'
+                  ? (batchRunning ? `Delay: ${automation.interval || 2}s` : 'Manual batch trigger')
+                  : automation.mode === 'once'
+                  ? 'Not scheduled'
+                  : sendingVaults.includes(selectedVault)
+                  ? 'Executing now…'
+                  : automation.status === 'running'
+                  ? formatCountdown(automation.nextAt, now)
+                  : '—'}
+              </strong>
             </div>
             <div className="strategy-actions">
-              {automation.mode === 'once' ? (
+              {signerMode === 'csv' ? (
+                <>
+                  <button
+                    className="danger"
+                    type="button"
+                    onClick={stopBatchAutomation}
+                    disabled={!batchRunning}
+                  >
+                    STOP BATCH
+                  </button>
+                  <button
+                    className="start primary-action"
+                    type="button"
+                    onClick={() => void startBatchAutomation()}
+                    disabled={batchRunning || csvQueue.length === 0 || !vault.address || vault.address === 'Not configured'}
+                  >
+                    {batchRunning ? 'EXECUTING BATCH…' : `START BATCH DEPOSIT (${csvQueue.length} WALLETS)`}
+                  </button>
+                </>
+              ) : automation.mode === 'once' ? (
                 <button
                   className="manual-send primary-action"
                   type="button"
