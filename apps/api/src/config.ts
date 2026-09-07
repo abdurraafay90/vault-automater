@@ -42,12 +42,15 @@ const environmentSchema = z.object({
   EVM_RPC_URL: z.url().default('https://eth-sepolia.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K'),
   EVM_CHAIN_ID: z.coerce.number().int().default(11155111),
   EVM_EXPLORER_URL: z.url().default('https://sepolia.etherscan.io'),
-  BNB_MAINNET_RPC_URL: z.string().trim().default('https://bsc-dataseed.binance.org/'),
+  BNB_MAINNET_RPC_URL: z.string().trim().default('https://bsc.rpc.blxrbdn.com'),
   BNB_MAINNET_CHAIN_ID: z.coerce.number().int().default(56),
   BNB_MAINNET_EXPLORER_URL: z.string().trim().default('https://bscscan.com'),
   BNB_TESTNET_RPC_URL: z.string().trim().default('https://data-seed-prebsc-1-s1.binance.org:8545/'),
   BNB_TESTNET_CHAIN_ID: z.coerce.number().int().default(97),
   BNB_TESTNET_EXPLORER_URL: z.string().trim().default('https://testnet.bscscan.com'),
+  TATUM_API_KEY: z.string().trim().optional(),
+  BSC_RPC_URLS: z.string().trim().optional(),
+  BSC_WS_URLS: z.string().trim().optional(),
   VAULT_1_NAME: z.string().min(1).default('Stablecoin Yield'),
   VAULT_1_ADDRESS: z.string().trim().optional().default(''),
   VAULT_1_IBC_RECEIVER: z.string().trim().optional().default(''),
@@ -72,7 +75,17 @@ const environmentSchema = z.object({
   SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(28_800),
 });
 
-export const config = environmentSchema.parse(process.env);
+const parsedEnv = environmentSchema.parse(process.env);
+const firstBscRpc = parsedEnv.BSC_RPC_URLS ? parsedEnv.BSC_RPC_URLS.split(',')[0]?.trim() : undefined;
+const resolvedBnbRpc = parsedEnv.BNB_MAINNET_RPC_URL !== 'https://bsc.rpc.blxrbdn.com'
+  ? parsedEnv.BNB_MAINNET_RPC_URL
+  : (firstBscRpc || parsedEnv.BNB_MAINNET_RPC_URL);
+
+export const config = {
+  ...parsedEnv,
+  BNB_MAINNET_RPC_URL: resolvedBnbRpc,
+};
+
 export const vaultsConfigured = Boolean(
   (config.VAULT_1_IBC_RECEIVER || config.VAULT_1_ADDRESS)
   && (config.VAULT_2_IBC_RECEIVER || config.VAULT_2_ADDRESS)

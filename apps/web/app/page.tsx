@@ -42,7 +42,14 @@ export type Vault = {
 };
 
 type ChainConfig = { name: string; id: string; rpcUrl: string; apiUrl: string; explorerUrl: string };
-type EvmConfig = { rpcUrl: string; chainId: number; explorerUrl: string; nativeCurrency?: { name: string; symbol: string; decimals: number } };
+type EvmConfig = {
+  rpcUrl: string;
+  chainId: number;
+  explorerUrl: string;
+  nativeCurrency?: { name: string; symbol: string; decimals: number };
+  rpcUrls?: string[];
+  wsUrls?: string[];
+};
 type TokenConfig = { symbol: string; denom: string; decimals: number };
 type IbcTransferConfig = {
   sourcePort: string;
@@ -97,7 +104,10 @@ async function inspectErc20Token(tokenAddress: string, evmConf?: EvmConfig): Pro
     return SEPOLIA_MUSDC;
   }
   const urls = [
+    ...(evmConf?.rpcUrls || []),
     evmConf?.rpcUrl,
+    'https://bsc.rpc.blxrbdn.com',
+    'https://bsc-mainnet.gateway.tatum.io',
     'https://bsc-dataseed.binance.org/',
     'https://data-seed-prebsc-1-s1.binance.org:8545/',
     'https://eth-sepolia.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
@@ -132,7 +142,10 @@ async function inspectErc20Token(tokenAddress: string, evmConf?: EvmConfig): Pro
 async function detectVaultAsset(vaultAddress: string, evmConf?: EvmConfig): Promise<VaultAsset | null> {
   if (!vaultAddress || !/^0x[0-9a-fA-F]{40}$/.test(vaultAddress)) return null;
   const urls = [
+    ...(evmConf?.rpcUrls || []),
     evmConf?.rpcUrl,
+    'https://bsc.rpc.blxrbdn.com',
+    'https://bsc-mainnet.gateway.tatum.io',
     'https://bsc-dataseed.binance.org/',
     'https://data-seed-prebsc-1-s1.binance.org:8545/',
     'https://eth-mainnet.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
@@ -327,10 +340,12 @@ const defaultEvmMainnetConfig: EvmConfig = {
 };
 
 const defaultBnbMainnetConfig: EvmConfig = {
-  rpcUrl: 'https://bsc-dataseed.binance.org/',
+  rpcUrl: 'https://bsc.rpc.blxrbdn.com',
   chainId: 56,
   explorerUrl: 'https://bscscan.com',
   nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
+  rpcUrls: ['https://bsc.rpc.blxrbdn.com', 'https://bsc-mainnet.gateway.tatum.io', 'https://bsc-dataseed.binance.org/'],
+  wsUrls: ['wss://bsc-rpc.publicnode.com', 'wss://bsc.drpc.org'],
 };
 
 const defaultBnbTestnetConfig: EvmConfig = {

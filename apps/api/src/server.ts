@@ -134,6 +134,8 @@ app.get('/api/config/public', async () => ({
     chainId: config.BNB_MAINNET_CHAIN_ID,
     explorerUrl: config.BNB_MAINNET_EXPLORER_URL,
     nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
+    rpcUrls: config.BSC_RPC_URLS ? config.BSC_RPC_URLS.split(',').map((u) => u.trim()) : [config.BNB_MAINNET_RPC_URL],
+    wsUrls: config.BSC_WS_URLS ? config.BSC_WS_URLS.split(',').map((u) => u.trim()) : [],
   },
   bnbTestnet: {
     rpcUrl: config.BNB_TESTNET_RPC_URL,
