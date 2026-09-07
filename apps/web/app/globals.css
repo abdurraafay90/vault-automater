@@ -2713,6 +2713,12 @@ button {
   border: 1px solid rgba(6, 182, 212, 0.3);
 }
 
+.chain-pill.bnb {
+  background: rgba(240, 185, 11, 0.14);
+  color: #f0b90b;
+  border: 1px solid rgba(240, 185, 11, 0.35);
+}
+
 .chain-pill.zigchain {
   background: rgba(59, 130, 246, 0.12);
   color: #60a5fa;
@@ -2742,6 +2748,7 @@ button {
 .pair-dot.orange { background: #f97316; }
 .pair-dot.cyan { background: #06b6d4; }
 .pair-dot.green { background: #10b981; }
+.pair-dot.yellow, .pair-dot.gold { background: #f0b90b; }
 
 .pulse {
   width: 8px;
@@ -2756,12 +2763,14 @@ button {
 .pulse.orange { background: #f97316; box-shadow: 0 0 8px rgba(249, 115, 22, 0.8); }
 .pulse.cyan { background: #06b6d4; box-shadow: 0 0 8px rgba(6, 182, 212, 0.8); }
 .pulse.green { background: #10b981; box-shadow: 0 0 8px rgba(16, 185, 129, 0.8); }
+.pulse.yellow, .pulse.gold { background: #f0b90b; box-shadow: 0 0 8px rgba(240, 185, 11, 0.8); }
 
 .vault-badge.blue { background: rgba(59, 130, 246, 0.12); color: #60a5fa; border-color: rgba(59, 130, 246, 0.25); }
 .vault-badge.purple { background: rgba(168, 85, 247, 0.12); color: #c084fc; border-color: rgba(168, 85, 247, 0.25); }
 .vault-badge.orange { background: rgba(249, 115, 22, 0.12); color: #fb923c; border-color: rgba(249, 115, 22, 0.25); }
 .vault-badge.cyan { background: rgba(6, 182, 212, 0.12); color: #38bdf8; border-color: rgba(6, 182, 212, 0.25); }
 .vault-badge.green { background: rgba(16, 185, 129, 0.12); color: #34d399; border-color: rgba(16, 185, 129, 0.25); }
+.vault-badge.yellow, .vault-badge.gold { background: rgba(240, 185, 11, 0.12); color: #f0b90b; border-color: rgba(240, 185, 11, 0.28); }
 
 /* ─── Responsive Media Queries ─────────────────────────────────────────── */
 @media (max-width: 1050px) {

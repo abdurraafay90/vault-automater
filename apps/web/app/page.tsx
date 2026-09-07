@@ -5,7 +5,11 @@ import { GasPrice, SigningStargateClient, coin } from '@cosmjs/stargate';
 import { ethers } from 'ethers';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
-export type ChainType = 'zigchain' | 'erc';
+export type ChainType = 'zigchain' | 'erc' | 'bnb';
+
+export function isEvmChain(chainType?: ChainType): boolean {
+  return chainType === 'erc' || chainType === 'bnb';
+}
 
 export type VaultAsset = {
   symbol: string;
@@ -22,7 +26,7 @@ export type Vault = {
   name: string;
   address: string | null;
   chainType: ChainType;
-  accent: 'blue' | 'purple' | 'orange' | 'green' | 'cyan';
+  accent: 'blue' | 'purple' | 'orange' | 'green' | 'cyan' | 'yellow' | 'gold';
   tvl: string;
   apy: string;
   type: string;
@@ -76,6 +80,12 @@ const SEPOLIA_USDC: VaultAsset = { symbol: 'USDC', name: 'Sepolia USDC', address
 const SEPOLIA_USDT: VaultAsset = { symbol: 'USDT', name: 'Sepolia USDT', address: '0xaa8E23Fb10790ea71844564301cD459E5bd33e42', decimals: 6 };
 const SEPOLIA_ETH: VaultAsset = { symbol: 'ETH', name: 'Sepolia Ether', decimals: 18, isNative: true };
 
+// Presets for BNB Chain (BSC Mainnet & Testnet)
+const NATIVE_BNB: VaultAsset = { symbol: 'BNB', name: 'BNB Native Gas', decimals: 18, isNative: true };
+const TESTNET_BNB: VaultAsset = { symbol: 'tBNB', name: 'BNB Testnet Gas', decimals: 18, isNative: true };
+const BSC_MAINNET_USDT: VaultAsset = { symbol: 'USDT', name: 'Binance-Peg BSC-USD', address: '0x55d398326f99059fF775485246999027B3197955', decimals: 18, isDetected: true };
+const BSC_TESTNET_USDT: VaultAsset = { symbol: 'USDT', name: 'BSC Testnet USDT', address: '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd', decimals: 18, isDetected: true };
+
 // Presets for ZIGChain
 const ZIGCHAIN_USDC: VaultAsset = { symbol: 'USDC', name: 'Noble USDC', decimals: 6, isDetected: true };
 const ZIGCHAIN_ZIG: VaultAsset = { symbol: 'ZIG', name: 'ZIG Native Gas', decimals: 6, isNative: true };
@@ -88,6 +98,8 @@ async function inspectErc20Token(tokenAddress: string, evmConf?: EvmConfig): Pro
   }
   const urls = [
     evmConf?.rpcUrl,
+    'https://bsc-dataseed.binance.org/',
+    'https://data-seed-prebsc-1-s1.binance.org:8545/',
     'https://eth-sepolia.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
     'https://eth-mainnet.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
   ];
@@ -121,6 +133,8 @@ async function detectVaultAsset(vaultAddress: string, evmConf?: EvmConfig): Prom
   if (!vaultAddress || !/^0x[0-9a-fA-F]{40}$/.test(vaultAddress)) return null;
   const urls = [
     evmConf?.rpcUrl,
+    'https://bsc-dataseed.binance.org/',
+    'https://data-seed-prebsc-1-s1.binance.org:8545/',
     'https://eth-mainnet.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
     'https://eth-sepolia.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
   ];
@@ -216,15 +230,17 @@ function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig, dyna
     list.push(targetVault.customAsset);
   }
 
-  // If vault explicitly specified a tokenSymbol (e.g. mUSDC) but it wasn't added yet
+  // If vault explicitly specified a tokenSymbol (e.g. mUSDC or BNB) but it wasn't added yet
   if (targetVault.tokenSymbol && !list.some((existing) => existing.symbol.toLowerCase() === targetVault.tokenSymbol?.toLowerCase())) {
-    if (isSepolia && targetVault.tokenSymbol.toLowerCase() === 'musdc') {
+    if (targetVault.chainType === 'bnb' && targetVault.tokenSymbol.toLowerCase() === 'bnb') {
+      list.push(targetVault.evmNetwork === 'testnet' ? TESTNET_BNB : NATIVE_BNB);
+    } else if (isSepolia && targetVault.tokenSymbol.toLowerCase() === 'musdc') {
       list.push(SEPOLIA_MUSDC);
     } else {
       list.push({
         symbol: targetVault.tokenSymbol,
         name: `${targetVault.tokenSymbol} (Vault Token)`,
-        decimals: targetVault.tokenDecimals ?? 6,
+        decimals: targetVault.tokenDecimals ?? (targetVault.chainType === 'bnb' ? 18 : 6),
         address: targetVault.tokenAddress,
       });
     }
@@ -239,7 +255,11 @@ function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig, dyna
 
   // Fallback if list is empty
   if (list.length === 0) {
-    list.push(isSepolia ? SEPOLIA_ETH : NATIVE_ETH);
+    if (targetVault.chainType === 'bnb') {
+      list.push(targetVault.evmNetwork === 'testnet' ? TESTNET_BNB : NATIVE_BNB);
+    } else {
+      list.push(isSepolia ? SEPOLIA_ETH : NATIVE_ETH);
+    }
   }
 
   return list;
@@ -306,13 +326,32 @@ const defaultEvmMainnetConfig: EvmConfig = {
   nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
 };
 
+const defaultBnbMainnetConfig: EvmConfig = {
+  rpcUrl: 'https://bsc-dataseed.binance.org/',
+  chainId: 56,
+  explorerUrl: 'https://bscscan.com',
+  nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
+};
+
+const defaultBnbTestnetConfig: EvmConfig = {
+  rpcUrl: 'https://data-seed-prebsc-1-s1.binance.org:8545/',
+  chainId: 97,
+  explorerUrl: 'https://testnet.bscscan.com',
+  nativeCurrency: { name: 'tBNB', symbol: 'tBNB', decimals: 18 },
+};
+
 function getVaultEvmConfig(
   targetVault?: Vault | null,
   fallbackEvm: EvmConfig = defaultEvmConfig,
   testnetEvm: EvmConfig = defaultEvmTestnetConfig,
-  mainnetEvm: EvmConfig = defaultEvmMainnetConfig
+  mainnetEvm: EvmConfig = defaultEvmMainnetConfig,
+  bnbMainnetEvm: EvmConfig = defaultBnbMainnetConfig,
+  bnbTestnetEvm: EvmConfig = defaultBnbTestnetConfig,
 ): EvmConfig {
   if (!targetVault) return fallbackEvm;
+  if (targetVault.chainType === 'bnb') {
+    return targetVault.evmNetwork === 'testnet' ? bnbTestnetEvm : bnbMainnetEvm;
+  }
   if (targetVault.evmNetwork === 'testnet') return testnetEvm;
   if (targetVault.evmNetwork === 'mainnet') return mainnetEvm;
 
@@ -435,6 +474,42 @@ const defaultVaults: Vault[] = [
     tokenAddress: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
     detectedAsset: SEPOLIA_USDC,
     selectedAssetSymbol: 'USDC',
+  },
+  {
+    pair: 'BNB 1',
+    name: 'PancakeSwap Yield',
+    address: '0x10ED43C718714eb63d5aA57B78B54704E256024E',
+    chainType: 'bnb',
+    evmNetwork: 'mainnet',
+    accent: 'yellow',
+    tvl: '$32,500,000',
+    apy: '15.60%',
+    type: 'DEX Automated Yield',
+    risk: 'Medium',
+    summary: 'Automated yield & liquidity strategy on BNB Smart Chain (USDT)',
+    tokenSymbol: 'USDT',
+    tokenDecimals: 18,
+    tokenAddress: '0x55d398326f99059fF775485246999027B3197955',
+    detectedAsset: BSC_MAINNET_USDT,
+    selectedAssetSymbol: 'USDT',
+  },
+  {
+    pair: 'BNB 2',
+    name: 'BSC Testnet Strategy',
+    address: '0x9ac64cc6e4415144c455bd8e4837fea55603e5c3',
+    chainType: 'bnb',
+    evmNetwork: 'testnet',
+    accent: 'yellow',
+    tvl: '$8,200,000',
+    apy: '18.40%',
+    type: 'BSC Testnet Strategy',
+    risk: 'Low',
+    summary: 'BNB Smart Chain Testnet automated vault strategy (USDT)',
+    tokenSymbol: 'USDT',
+    tokenDecimals: 18,
+    tokenAddress: '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd',
+    detectedAsset: BSC_TESTNET_USDT,
+    selectedAssetSymbol: 'USDT',
   },
 ];
 
@@ -596,8 +671,8 @@ function formatBlockchainError(error: unknown, chainType: ChainType, symbol = 'E
   // Strip raw JSON dumps from ethers or CosmJS
   if (raw.includes('{') && raw.includes('}')) {
     const cleaned = raw.replace(/\{[\S\s]*\}/g, '').replace(/\(action=[\S\s]*\)/g, '').trim();
-    if (cleaned.length > 5 && cleaned.length < 120) return cleaned;
-    return `Transaction failed on ${chainType === 'erc' ? 'Ethereum / EVM' : 'ZIGChain'}. Please verify your wallet balance and network gas.`;
+    const chainName = chainType === 'bnb' ? 'BNB Chain' : chainType === 'erc' ? 'Ethereum / EVM' : 'ZIGChain';
+    return `Transaction failed on ${chainName}. Please verify your wallet balance and network gas.`;
   }
 
   if (raw.length > 180) {
@@ -638,6 +713,8 @@ export default function Home() {
   const [evmConfig, setEvmConfig] = useState<EvmConfig>(defaultEvmConfig);
   const [evmTestnetConfig, setEvmTestnetConfig] = useState<EvmConfig>(defaultEvmTestnetConfig);
   const [evmMainnetConfig, setEvmMainnetConfig] = useState<EvmConfig>(defaultEvmMainnetConfig);
+  const [bnbMainnetConfig, setBnbMainnetConfig] = useState<EvmConfig>(defaultBnbMainnetConfig);
+  const [bnbTestnetConfig, setBnbTestnetConfig] = useState<EvmConfig>(defaultBnbTestnetConfig);
   const [transferToken, setTransferToken] = useState<TokenConfig>(defaultTokenConfig);
   const [nativeToken, setNativeToken] = useState<TokenConfig>(defaultTokenConfig);
   const [ibcTransfer, setIbcTransfer] = useState<IbcTransferConfig>(defaultIbcTransferConfig);
@@ -666,7 +743,7 @@ export default function Home() {
   // Add Vault Modal & Sidebar State
   const [addVaultOpen, setAddVaultOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [sidebarFilter, setSidebarFilter] = useState<'all' | 'zigchain' | 'erc'>('all');
+  const [sidebarFilter, setSidebarFilter] = useState<'all' | 'zigchain' | 'erc' | 'bnb'>('all');
   const [newVaultName, setNewVaultName] = useState('');
   const [newVaultChain, setNewVaultChain] = useState<ChainType>('zigchain');
   const [newVaultEvmNetwork, setNewVaultEvmNetwork] = useState<'testnet' | 'mainnet'>('testnet');
@@ -698,6 +775,8 @@ export default function Home() {
   const evmConfigRef = useRef<EvmConfig>(defaultEvmConfig);
   const evmTestnetConfigRef = useRef<EvmConfig>(defaultEvmTestnetConfig);
   const evmMainnetConfigRef = useRef<EvmConfig>(defaultEvmMainnetConfig);
+  const bnbMainnetConfigRef = useRef<EvmConfig>(defaultBnbMainnetConfig);
+  const bnbTestnetConfigRef = useRef<EvmConfig>(defaultBnbTestnetConfig);
   const transferTokenRef = useRef<TokenConfig>(defaultTokenConfig);
   const nativeTokenRef = useRef<TokenConfig>(defaultTokenConfig);
   const ibcTransferRef = useRef<IbcTransferConfig>(defaultIbcTransferConfig);
@@ -710,7 +789,7 @@ export default function Home() {
   const automation = automations[selectedVault] ?? { mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null };
   const walletSession = walletSessions[selectedVault] ?? { mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false };
 
-  const currentVaultEvmConfig = getVaultEvmConfig(vault, evmConfig, evmTestnetConfig, evmMainnetConfig);
+  const currentVaultEvmConfig = getVaultEvmConfig(vault, evmConfig, evmTestnetConfig, evmMainnetConfig, bnbMainnetConfig, bnbTestnetConfig);
   const activeVaultAsset = getActiveVaultAsset(vault, currentVaultEvmConfig, walletDiscoveredAssets);
   const currentTokenSymbol = activeVaultAsset.symbol;
   const currentTokenDecimals = activeVaultAsset.decimals;
@@ -745,9 +824,9 @@ export default function Home() {
     }
   }
 
-  // Live ERC-4626 asset auto-detection when adding an EVM vault
+  // Live ERC/BEP-4626 asset auto-detection when adding an EVM vault
   useEffect(() => {
-    if (newVaultChain !== 'erc' || !/^0x[0-9a-fA-F]{40}$/.test(newVaultAddress.trim())) {
+    if (!isEvmChain(newVaultChain) || !/^0x[0-9a-fA-F]{40}$/.test(newVaultAddress.trim())) {
       setDetectedAddVaultAsset(null);
       return;
     }
@@ -755,7 +834,9 @@ export default function Home() {
     setDetectingAsset(true);
     const timer = setTimeout(async () => {
       try {
-        const targetEvm = newVaultEvmNetwork === 'mainnet' ? evmMainnetConfigRef.current : evmTestnetConfigRef.current;
+        const targetEvm = newVaultChain === 'bnb'
+          ? (newVaultEvmNetwork === 'mainnet' ? bnbMainnetConfigRef.current : bnbTestnetConfigRef.current)
+          : (newVaultEvmNetwork === 'mainnet' ? evmMainnetConfigRef.current : evmTestnetConfigRef.current);
         const detected = await detectVaultAsset(newVaultAddress.trim(), targetEvm);
         if (active) {
           setDetectedAddVaultAsset(detected);
@@ -777,9 +858,9 @@ export default function Home() {
     };
   }, [newVaultAddress, newVaultChain, newVaultEvmNetwork]);
 
-  // Live ERC-20 token inspection when specifying custom token address in Add Vault modal
+  // Live ERC-20 / BEP-20 token inspection when specifying custom token address in Add Vault modal
   useEffect(() => {
-    if (newVaultChain !== 'erc' || !/^0x[0-9a-fA-F]{40}$/.test(newVaultTokenAddress.trim())) {
+    if (!isEvmChain(newVaultChain) || !/^0x[0-9a-fA-F]{40}$/.test(newVaultTokenAddress.trim())) {
       setInspectedTokenInfo(null);
       return;
     }
@@ -787,7 +868,9 @@ export default function Home() {
     setInspectingToken(true);
     const timer = setTimeout(async () => {
       try {
-        const targetEvm = newVaultEvmNetwork === 'mainnet' ? evmMainnetConfigRef.current : evmTestnetConfigRef.current;
+        const targetEvm = newVaultChain === 'bnb'
+          ? (newVaultEvmNetwork === 'mainnet' ? bnbMainnetConfigRef.current : bnbTestnetConfigRef.current)
+          : (newVaultEvmNetwork === 'mainnet' ? evmMainnetConfigRef.current : evmTestnetConfigRef.current);
         const inspected = await inspectErc20Token(newVaultTokenAddress.trim(), targetEvm);
         if (active) {
           setInspectedTokenInfo(inspected);
@@ -811,13 +894,13 @@ export default function Home() {
 
   // Dynamically auto-detect accepted token for currently selected vault if it doesn't have detectedAsset yet
   useEffect(() => {
-    if (vault?.chainType !== 'erc' || !vault?.address || !/^0x[0-9a-fA-F]{40}$/.test(vault.address) || vault.detectedAsset) {
+    if (!isEvmChain(vault?.chainType) || !vault?.address || !/^0x[0-9a-fA-F]{40}$/.test(vault.address) || vault.detectedAsset) {
       return;
     }
     let active = true;
     void (async () => {
       try {
-        const vaultEvm = getVaultEvmConfig(vault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+        const vaultEvm = getVaultEvmConfig(vault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
         const detected = await detectVaultAsset(vault.address, vaultEvm);
         if (active && detected) {
           setVaults((cur) =>
@@ -925,6 +1008,8 @@ export default function Home() {
         evm?: EvmConfig;
         evmTestnet?: EvmConfig;
         evmMainnet?: EvmConfig;
+        bnbMainnet?: EvmConfig;
+        bnbTestnet?: EvmConfig;
         nativeToken?: TokenConfig;
         token?: TokenConfig;
         ibcTransfer?: IbcTransferConfig;
@@ -935,6 +1020,8 @@ export default function Home() {
       const nextEvmConfig = data.evm ?? defaultEvmConfig;
       const nextEvmTestnetConfig = data.evmTestnet ?? defaultEvmTestnetConfig;
       const nextEvmMainnetConfig = data.evmMainnet ?? defaultEvmMainnetConfig;
+      const nextBnbMainnetConfig = data.bnbMainnet ?? defaultBnbMainnetConfig;
+      const nextBnbTestnetConfig = data.bnbTestnet ?? defaultBnbTestnetConfig;
       const nextTransferToken = data.token ?? defaultTokenConfig;
       const nextNativeToken = data.nativeToken ?? defaultTokenConfig;
       const nextIbcTransfer = data.ibcTransfer ?? defaultIbcTransferConfig;
@@ -956,19 +1043,21 @@ export default function Home() {
           const customData = await customRes.json() as { vaults: Array<{ id: string; name: string; address: string; chainType: ChainType; evmNetwork?: 'mainnet' | 'testnet'; tokenAddress?: string; tokenSymbol?: string; tokenDecimals?: number; summary?: string }> };
           customVaults = customData.vaults.map((cv, i) => {
             const resolvedAddress = cv.tokenAddress || (cv.chainType === 'erc' && (cv.tokenSymbol?.toLowerCase() === 'musdc') ? SEPOLIA_MUSDC.address : undefined);
+            const pairLabel = cv.chainType === 'bnb' ? `BNB ${i + 3}` : cv.chainType === 'erc' ? `ERC ${i + 3}` : `CUSTOM ${i + 1}`;
+            const accentColor = cv.chainType === 'bnb' ? 'yellow' : cv.chainType === 'erc' ? (cv.evmNetwork === 'mainnet' ? 'green' : 'cyan') : 'blue';
             return {
               id: cv.id,
-              pair: cv.chainType === 'erc' ? `ERC ${i + 3}` : `CUSTOM ${i + 1}`,
+              pair: pairLabel,
               name: cv.name,
               address: cv.address,
               chainType: cv.chainType,
               evmNetwork: cv.evmNetwork,
-              accent: cv.chainType === 'erc' ? (cv.evmNetwork === 'mainnet' ? 'green' : 'cyan') : 'blue',
+              accent: accentColor,
               tvl: '$0',
               apy: '—',
               type: 'Custom Vault',
               risk: 'Medium',
-              summary: cv.summary || 'Custom user vault',
+              summary: cv.summary || (cv.chainType === 'bnb' ? 'Custom BNB vault' : 'Custom user vault'),
               tokenSymbol: cv.tokenSymbol,
               tokenDecimals: cv.tokenDecimals,
               tokenAddress: resolvedAddress,
@@ -977,7 +1066,7 @@ export default function Home() {
                 symbol: cv.tokenSymbol || 'TOKEN',
                 name: cv.tokenSymbol ? `${cv.tokenSymbol} Token` : 'Custom Token',
                 address: resolvedAddress,
-                decimals: cv.tokenDecimals ?? 6,
+                decimals: cv.tokenDecimals ?? (cv.chainType === 'bnb' ? 18 : 6),
                 isCustom: true,
               } : undefined,
             };
@@ -1013,6 +1102,10 @@ export default function Home() {
       evmConfigRef.current = nextEvmConfig;
       evmTestnetConfigRef.current = nextEvmTestnetConfig;
       evmMainnetConfigRef.current = nextEvmMainnetConfig;
+      bnbMainnetConfigRef.current = nextBnbMainnetConfig;
+      bnbTestnetConfigRef.current = nextBnbTestnetConfig;
+      setBnbMainnetConfig(nextBnbMainnetConfig);
+      setBnbTestnetConfig(nextBnbTestnetConfig);
       transferTokenRef.current = nextTransferToken;
       nativeTokenRef.current = nextNativeToken;
       ibcTransferRef.current = nextIbcTransfer;
@@ -1045,9 +1138,9 @@ export default function Home() {
     const currentVault = vaultsRef.current[index];
     if (!currentVault) return;
 
-    if (currentVault.chainType === 'erc') {
+    if (isEvmChain(currentVault.chainType)) {
       try {
-        const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+        const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
         const provider = new ethers.JsonRpcProvider(vaultEvm.rpcUrl);
         const activeAsset = getActiveVaultAsset(currentVault, vaultEvm, walletDiscoveredAssetsRef.current);
 
@@ -1153,7 +1246,7 @@ export default function Home() {
 
   async function loadHistory(index: number, address: string, generation = sessionGenerationRef.current[index] ?? 0) {
     const currentVault = vaultsRef.current[index];
-    if (currentVault?.chainType === 'erc') {
+    if (isEvmChain(currentVault?.chainType)) {
       // EVM history is recorded locally from transactions
       return;
     }
@@ -1192,8 +1285,8 @@ export default function Home() {
       const currentVault = vaultsRef.current[index];
       if (!currentVault) throw new Error('Vault not selected.');
 
-      if (currentVault.chainType === 'erc') {
-        const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+      if (isEvmChain(currentVault.chainType)) {
+        const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
         const provider = new ethers.JsonRpcProvider(vaultEvm.rpcUrl);
         let wallet: ethers.Wallet;
         if (secret.includes(' ')) {
@@ -1374,9 +1467,9 @@ export default function Home() {
   function getAmountRange(index: number) {
     const currentVault = vaultsRef.current[index] ?? vaults[index];
     if (!currentVault) throw new Error('Selected vault is unavailable.');
-    const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+    const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
     const activeAsset = getActiveVaultAsset(currentVault, vaultEvm, walletDiscoveredAssetsRef.current);
-    const decimals = activeAsset?.decimals ?? (currentVault.tokenDecimals ?? (currentVault.chainType === 'erc' ? 18 : transferTokenRef.current.decimals));
+    const decimals = activeAsset?.decimals ?? (currentVault.tokenDecimals ?? (isEvmChain(currentVault.chainType) ? 18 : transferTokenRef.current.decimals));
     const settings = automationsRef.current[index] ?? automations[index];
     if (!settings) throw new Error('Automation settings not initialized for this vault.');
     const minimum = parseTokenAmount(settings.minimum, decimals);
@@ -1391,7 +1484,7 @@ export default function Home() {
     const target = vaultsRef.current[index] ?? vaults[index];
     const session = walletSessionsRef.current[index] ?? walletSessions[index];
     if (!target) return false;
-    const vaultEvm = getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+    const vaultEvm = getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
     const activeAsset = getActiveVaultAsset(target, vaultEvm, walletDiscoveredAssetsRef.current);
     const decimals = activeAsset.decimals;
     const settings = automationsRef.current[index] ?? automations[index];
@@ -1464,28 +1557,29 @@ export default function Home() {
     setSendingVaults((current) => [...new Set([...current, index])]);
 
     try {
-      if (target.chainType === 'erc') {
+      if (isEvmChain(target.chainType)) {
         if (universalSigner.type !== 'evm') throw new Error('Signer is not an EVM wallet.');
 
-        const vaultEvm = getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current);
+        const vaultEvm = getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
         const activeAsset = getActiveVaultAsset(target, vaultEvm, walletDiscoveredAssetsRef.current);
         const symbol = activeAsset.symbol;
         const decimals = activeAsset.decimals;
+        const gasSymbol = target.chainType === 'bnb' ? (vaultEvm.chainId === 97 ? 'tBNB' : 'BNB') : 'ETH';
 
-        // Pre-flight gas check on EVM (must have native ETH to pay network gas fees)
+        // Pre-flight gas check on EVM (must have native ETH / BNB to pay network gas fees)
         let gasBalanceWei: bigint | null = null;
         try {
           gasBalanceWei = await universalSigner.provider.getBalance(universalSigner.wallet.address);
         } catch {}
 
         if (gasBalanceWei !== null && gasBalanceWei === 0n) {
-          throw new Error(`Insufficient funds for gas: Your wallet (${universalSigner.wallet.address.slice(0, 6)}…${universalSigner.wallet.address.slice(-4)}) has 0 ETH. EVM transactions require ETH to pay network gas fees.`);
+          throw new Error(`Insufficient funds for gas: Your wallet (${universalSigner.wallet.address.slice(0, 6)}…${universalSigner.wallet.address.slice(-4)}) has 0 ${gasSymbol}. ${target.chainType === 'bnb' ? 'BNB Chain' : 'EVM'} transactions require ${gasSymbol} to pay network gas fees.`);
         }
 
         let txHash = '';
 
         if (activeAsset.isNative || !activeAsset.address) {
-          // Native ETH transfer
+          // Native ETH / BNB transfer
           if (gasBalanceWei !== null) {
             if (gasBalanceWei < amount) {
               throw new Error(`Insufficient balance: Current balance (${formatBaseUnits(gasBalanceWei, decimals)} ${symbol}) is less than transfer amount (${formatBaseUnits(amount, decimals)} ${symbol}).`);
@@ -1497,10 +1591,10 @@ export default function Home() {
             value: amount,
           });
           const receipt = await tx.wait(1);
-          if (!receipt || receipt.status === 0) throw new Error('EVM transaction was reverted by the network.');
+          if (!receipt || receipt.status === 0) throw new Error(`${target.chainType === 'bnb' ? 'BNB Chain' : 'EVM'} transaction was reverted by the network.`);
           txHash = tx.hash;
         } else {
-          // ERC-20 token transfer (USDT, USDC, etc.)
+          // ERC-20 / BEP-20 token transfer (USDT, USDC, etc.)
           const tokenContract = new ethers.Contract(activeAsset.address, ERC20_ABI, universalSigner.wallet);
 
           let tokenBal: bigint | null = null;
@@ -1590,9 +1684,9 @@ export default function Home() {
         return true;
       }
     } catch (error) {
-      const vaultEvm = target ? getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current) : undefined;
+      const vaultEvm = target ? getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current) : undefined;
       const activeAsset = target && vaultEvm ? getActiveVaultAsset(target, vaultEvm, walletDiscoveredAssetsRef.current) : null;
-      const symbol = activeAsset?.symbol ?? (target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol));
+      const symbol = activeAsset?.symbol ?? (target?.tokenSymbol ?? (target?.chainType === 'bnb' ? 'BNB' : target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol));
       const message = formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol);
       if (generation === (sessionGenerationRef.current[index] ?? 0)) {
         setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Failed', error: message } : item));
@@ -1642,7 +1736,7 @@ export default function Home() {
     } catch (error) {
       pauseAutomation(index);
       const target = vaultsRef.current[index] ?? vaults[index];
-      const symbol = target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
+      const symbol = target?.tokenSymbol ?? (target?.chainType === 'bnb' ? 'BNB' : target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
       setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
     }
   }
@@ -1664,7 +1758,7 @@ export default function Home() {
       void runAutomationCycle(index, true);
     } catch (error) {
       const target = vaultsRef.current[index] ?? vaults[index];
-      const symbol = target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
+      const symbol = target?.tokenSymbol ?? (target?.chainType === 'bnb' ? 'BNB' : target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
       setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
     }
   }
@@ -1696,7 +1790,7 @@ export default function Home() {
       void enqueueTransfer(selectedVault, minimum, 'Manual');
     } catch (error) {
       const target = vaultsRef.current[selectedVault];
-      const symbol = target?.tokenSymbol ?? (target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
+      const symbol = target?.tokenSymbol ?? (target?.chainType === 'bnb' ? 'BNB' : target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
       setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
     }
   }
@@ -1740,17 +1834,17 @@ export default function Home() {
       }
     } else {
       if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
-        return setAddVaultError('Enter a valid ERC / EVM hexadecimal address (0x followed by 40 hex characters).');
+        return setAddVaultError(`Enter a valid ${newVaultChain === 'bnb' ? 'BNB Chain' : 'ERC / EVM'} hexadecimal address (0x followed by 40 hex characters).`);
       }
     }
 
     setSavingVault(true);
     try {
-      const symbol = newVaultSymbol.trim() || detectedAddVaultAsset?.symbol || inspectedTokenInfo?.symbol || (newVaultChain === 'erc' ? 'ETH' : 'ZIG');
-      const decimals = newVaultDecimals.trim() ? Number(newVaultDecimals) : (detectedAddVaultAsset?.decimals ?? inspectedTokenInfo?.decimals ?? (newVaultChain === 'erc' ? 18 : 6));
-      const summary = newVaultSummary.trim() || `${newVaultChain === 'erc' ? 'ERC / EVM' : 'ZIGChain'} custom automated vault strategy`;
-      const tokenAddressToSave = (newVaultChain === 'erc'
-        ? (newVaultTokenAddress.trim() || inspectedTokenInfo?.address || detectedAddVaultAsset?.address || (symbol.toLowerCase() === 'musdc' ? SEPOLIA_MUSDC.address : undefined))
+      const symbol = newVaultSymbol.trim() || detectedAddVaultAsset?.symbol || inspectedTokenInfo?.symbol || (newVaultChain === 'bnb' ? 'BNB' : newVaultChain === 'erc' ? 'ETH' : 'ZIG');
+      const decimals = newVaultDecimals.trim() ? Number(newVaultDecimals) : (detectedAddVaultAsset?.decimals ?? inspectedTokenInfo?.decimals ?? (isEvmChain(newVaultChain) ? 18 : 6));
+      const summary = newVaultSummary.trim() || `${newVaultChain === 'bnb' ? 'BNB Chain' : newVaultChain === 'erc' ? 'ERC / EVM' : 'ZIGChain'} custom automated vault strategy`;
+      const tokenAddressToSave = (isEvmChain(newVaultChain)
+        ? (newVaultTokenAddress.trim() || inspectedTokenInfo?.address || detectedAddVaultAsset?.address || (newVaultChain === 'erc' && symbol.toLowerCase() === 'musdc' ? SEPOLIA_MUSDC.address : undefined))
         : undefined);
 
       let createdId = `custom-${unixNow()}`;
@@ -1763,7 +1857,7 @@ export default function Home() {
             name,
             address,
             chainType: newVaultChain,
-            evmNetwork: newVaultChain === 'erc' ? newVaultEvmNetwork : undefined,
+            evmNetwork: isEvmChain(newVaultChain) ? newVaultEvmNetwork : undefined,
             tokenSymbol: symbol,
             tokenDecimals: decimals,
             tokenAddress: tokenAddressToSave,
@@ -1777,15 +1871,18 @@ export default function Home() {
       } catch {}
 
       const newIndex = vaults.length;
-      const newPair = newVaultChain === 'erc' ? `ERC ${newIndex - 2}` : `PAIR ${newIndex + 1}`;
+      const bnbCount = vaults.filter((v) => v.chainType === 'bnb').length + 1;
+      const ercCount = vaults.filter((v) => v.chainType === 'erc').length + 1;
+      const newPair = newVaultChain === 'bnb' ? `BNB ${bnbCount}` : newVaultChain === 'erc' ? `ERC ${ercCount}` : `PAIR ${newIndex + 1}`;
+      const newAccent = newVaultChain === 'bnb' ? 'yellow' : newVaultChain === 'erc' ? (newVaultEvmNetwork === 'mainnet' ? 'green' : 'cyan') : 'blue';
       const newVault: Vault = {
         id: createdId,
         pair: newPair,
         name,
         address,
         chainType: newVaultChain,
-        evmNetwork: newVaultChain === 'erc' ? newVaultEvmNetwork : undefined,
-        accent: newVaultChain === 'erc' ? (newVaultEvmNetwork === 'mainnet' ? 'green' : 'cyan') : 'blue',
+        evmNetwork: isEvmChain(newVaultChain) ? newVaultEvmNetwork : undefined,
+        accent: newAccent,
         tvl: '$0',
         apy: '—',
         type: 'Custom Vault',
@@ -2055,6 +2152,13 @@ export default function Home() {
           >
             ERC ({vaults.filter((v) => v.chainType === 'erc').length})
           </button>
+          <button
+            type="button"
+            className={sidebarFilter === 'bnb' ? 'active' : ''}
+            onClick={() => setSidebarFilter('bnb')}
+          >
+            BNB ({vaults.filter((v) => v.chainType === 'bnb').length})
+          </button>
         </div>
 
         <div className="sidebar-vaults-list">
@@ -2073,7 +2177,9 @@ export default function Home() {
                 >
                   <div className="sidebar-vault-top">
                     <span className={`chain-pill ${item.chainType}`}>
-                      {item.chainType === 'erc'
+                      {item.chainType === 'bnb'
+                        ? (item.evmNetwork === 'mainnet' ? 'BSC MAINNET' : 'BSC TESTNET')
+                        : item.chainType === 'erc'
                         ? (item.evmNetwork === 'mainnet' ? 'MAINNET' : 'SEPOLIA')
                         : 'ZIGCHAIN'}
                     </span>
@@ -2154,7 +2260,9 @@ export default function Home() {
           title="Click to browse all vaults"
         >
           <span className={`chain-pill ${vault.chainType}`}>
-            {vault.chainType === 'erc'
+            {vault.chainType === 'bnb'
+              ? (currentVaultEvmConfig.chainId === 56 ? 'BSC MAINNET' : 'BSC TESTNET')
+              : vault.chainType === 'erc'
               ? (currentVaultEvmConfig.chainId === 1 ? 'MAINNET' : 'SEPOLIA')
               : 'ZIG'}
           </span>
@@ -2187,7 +2295,7 @@ export default function Home() {
               <div>
                 <span>STRATEGY MANAGEMENT</span>
                 <h2>Add Another Vault</h2>
-                <p>Configure a new ZIGChain or ERC (EVM) automated vault strategy.</p>
+                <p>Configure a new ZIGChain, ERC (Ethereum), or BNB Chain automated vault strategy.</p>
               </div>
               <button type="button" className="modal-close-btn" onClick={() => setAddVaultOpen(false)} aria-label="Close add vault">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -2210,8 +2318,16 @@ export default function Home() {
                     className={`chain-select-btn ${newVaultChain === 'erc' ? 'active' : ''}`}
                     onClick={() => setNewVaultChain('erc')}
                   >
-                    <strong>⟠ ERC / EVM</strong>
-                    <small>EVM smart contracts · 0x… addresses</small>
+                    <strong>⟠ Ethereum / EVM</strong>
+                    <small>ERC smart contracts · 0x… addresses</small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`chain-select-btn ${newVaultChain === 'bnb' ? 'active' : ''}`}
+                    onClick={() => setNewVaultChain('bnb')}
+                  >
+                    <strong>⬡ BNB Chain (BSC)</strong>
+                    <small>BEP-20 / BSC contracts · 0x… addresses</small>
                   </button>
                 </div>
               </div>
@@ -2240,6 +2356,30 @@ export default function Home() {
                 </div>
               )}
 
+              {newVaultChain === 'bnb' && (
+                <div className="chain-selector-box" style={{ marginTop: '14px' }}>
+                  <span className="form-label">CHOOSE BNB SMART CHAIN NETWORK</span>
+                  <div className="chain-toggle-group">
+                    <button
+                      type="button"
+                      className={`chain-select-btn ${newVaultEvmNetwork === 'mainnet' ? 'active' : ''}`}
+                      onClick={() => setNewVaultEvmNetwork('mainnet')}
+                    >
+                      <strong>BNB Smart Chain Mainnet</strong>
+                      <small>BSC RPC · Chain ID 56</small>
+                    </button>
+                    <button
+                      type="button"
+                      className={`chain-select-btn ${newVaultEvmNetwork === 'testnet' ? 'active' : ''}`}
+                      onClick={() => setNewVaultEvmNetwork('testnet')}
+                    >
+                      <strong>BNB Chain Testnet</strong>
+                      <small>BSC Testnet RPC · Chain ID 97</small>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="form-row">
                 <label>
                   <span>VAULT NAME</span>
@@ -2247,7 +2387,7 @@ export default function Home() {
                     type="text"
                     value={newVaultName}
                     onChange={(e) => setNewVaultName(e.target.value)}
-                    placeholder={newVaultChain === 'erc' ? 'e.g. Nawa Yield Pool' : 'e.g. High Yield Strategy'}
+                    placeholder={newVaultChain === 'bnb' ? 'e.g. PancakeSwap Cake Pool' : newVaultChain === 'erc' ? 'e.g. Nawa Yield Pool' : 'e.g. High Yield Strategy'}
                     required
                   />
                 </label>
@@ -2257,24 +2397,24 @@ export default function Home() {
                     type="text"
                     value={newVaultAddress}
                     onChange={(e) => setNewVaultAddress(e.target.value)}
-                    placeholder={newVaultChain === 'erc' ? '0x...' : 'zig1...'}
+                    placeholder={isEvmChain(newVaultChain) ? '0x...' : 'zig1...'}
                     required
                     spellCheck={false}
                   />
                 </label>
               </div>
 
-              {newVaultChain === 'erc' && detectingAsset && (
+              {isEvmChain(newVaultChain) && detectingAsset && (
                 <div className="detecting-asset-notice">
-                  <span className="spinner-dots" /> Inspecting contract for ERC-4626 asset()…
+                  <span className="spinner-dots" /> Inspecting contract for {newVaultChain === 'bnb' ? 'BEP-4626' : 'ERC-4626'} asset()…
                 </div>
               )}
 
-              {newVaultChain === 'erc' && detectedAddVaultAsset && (
+              {isEvmChain(newVaultChain) && detectedAddVaultAsset && (
                 <div className="detected-asset-banner">
                   <div className="detected-asset-badge">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-                    ERC-4626 VAULT ASSET DETECTED
+                    {newVaultChain === 'bnb' ? 'BEP-4626' : 'ERC-4626'} VAULT ASSET DETECTED
                   </div>
                   <div className="detected-asset-content">
                     <strong>{detectedAddVaultAsset.name} ({detectedAddVaultAsset.symbol})</strong>
@@ -2283,7 +2423,7 @@ export default function Home() {
                 </div>
               )}
 
-              {newVaultChain === 'erc' && (
+              {isEvmChain(newVaultChain) && (
                 <div className="form-row">
                   <label style={{ width: '100%' }}>
                     <span>TOKEN CONTRACT ADDRESS (OPTIONAL)</span>
@@ -2291,24 +2431,24 @@ export default function Home() {
                       type="text"
                       value={newVaultTokenAddress}
                       onChange={(e) => setNewVaultTokenAddress(e.target.value)}
-                      placeholder="e.g. 0xebe4f4ac8a99979934aad3db24edd0caf6a6e934 (mUSDC)"
+                      placeholder={newVaultChain === 'bnb' ? 'e.g. 0x55d398326f99059ff775485246999027b3197955 (USDT)' : 'e.g. 0xebe4f4ac8a99979934aad3db24edd0caf6a6e934 (mUSDC)'}
                       spellCheck={false}
                     />
                   </label>
                 </div>
               )}
 
-              {newVaultChain === 'erc' && inspectingToken && (
+              {isEvmChain(newVaultChain) && inspectingToken && (
                 <div className="detecting-asset-notice">
-                  <span className="spinner-dots" /> Inspecting ERC-20 token contract…
+                  <span className="spinner-dots" /> Inspecting {newVaultChain === 'bnb' ? 'BEP-20' : 'ERC-20'} token contract…
                 </div>
               )}
 
-              {newVaultChain === 'erc' && inspectedTokenInfo && (
+              {isEvmChain(newVaultChain) && inspectedTokenInfo && (
                 <div className="detected-asset-banner">
                   <div className="detected-asset-badge">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-                    ERC-20 TOKEN VERIFIED
+                    {newVaultChain === 'bnb' ? 'BEP-20' : 'ERC-20'} TOKEN VERIFIED
                   </div>
                   <div className="detected-asset-content">
                     <strong>{inspectedTokenInfo.name} ({inspectedTokenInfo.symbol})</strong>
@@ -2324,7 +2464,7 @@ export default function Home() {
                     type="text"
                     value={newVaultSymbol}
                     onChange={(e) => setNewVaultSymbol(e.target.value)}
-                    placeholder="USDC"
+                    placeholder={newVaultChain === 'bnb' ? 'USDT' : 'USDC'}
                   />
                 </label>
                 <label>
@@ -2333,7 +2473,7 @@ export default function Home() {
                     type="number"
                     value={newVaultDecimals}
                     onChange={(e) => setNewVaultDecimals(e.target.value)}
-                    placeholder="6"
+                    placeholder={newVaultChain === 'bnb' ? '18' : '6'}
                   />
                 </label>
                 <label>
@@ -2428,7 +2568,7 @@ export default function Home() {
                 <div className="delete-info-row">
                   <span>Chain:</span>
                   <span className={`chain-pill ${vaultToDelete.vault.chainType}`}>
-                    {vaultToDelete.vault.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'}
+                    {vaultToDelete.vault.chainType === 'bnb' ? 'BNB CHAIN' : vaultToDelete.vault.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'}
                   </span>
                 </div>
                 {vaultToDelete.vault.address && vaultToDelete.vault.address !== 'Not configured' && (
@@ -2473,7 +2613,7 @@ export default function Home() {
         <header className="vault-hero">
           <div className="hero-title">
             <p>
-              <span className={`pulse ${vault.accent}`} /> {vault.pair} — {vault.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'} VAULT AUTOMATION
+              <span className={`pulse ${vault.accent}`} /> {vault.pair} — {vault.chainType === 'bnb' ? 'BNB CHAIN' : vault.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'} VAULT AUTOMATION
             </p>
             <h1><span>{currentTokenSymbol}</span><b>→</b>{vault.name}</h1>
           </div>
@@ -2525,7 +2665,7 @@ export default function Home() {
                 <div className="connection-heading">
                   <span className="connection-mark">✓</span>
                   <div>
-                    <small>SESSION UNLOCKED · {vault.pair} ({vault.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'})</small>
+                    <small>SESSION UNLOCKED · {vault.pair} ({vault.chainType === 'bnb' ? 'BNB CHAIN' : vault.chainType === 'erc' ? 'ERC / EVM' : 'ZIGCHAIN'})</small>
                     <h3>Signer active in memory</h3>
                   </div>
                   <span className="connection-method">PRIVATE KEY</span>
@@ -2535,11 +2675,11 @@ export default function Home() {
                   <code>{walletSession.address}</code>
                   <span>AVAILABLE {currentTokenSymbol} BALANCE</span>
                   <strong>{formatBaseUnits(walletSession.balanceBaseUnits, currentTokenDecimals)} {currentTokenSymbol}</strong>
-                  {vault.chainType === 'erc' && !activeVaultAsset.isNative && (
+                  {isEvmChain(vault.chainType) && !activeVaultAsset.isNative && (
                     <>
-                      <span style={{ marginTop: '10px' }}>GAS RESERVE (ETH)</span>
+                      <span style={{ marginTop: '10px' }}>GAS RESERVE ({vault.chainType === 'bnb' ? (currentVaultEvmConfig.chainId === 97 ? 'tBNB' : 'BNB') : 'ETH'})</span>
                       <strong className={BigInt(walletSession.nativeGasBaseUnits || '0') === 0n ? 'gas-zero-warning' : ''}>
-                        {formatBaseUnits(walletSession.nativeGasBaseUnits, 18)} ETH
+                        {formatBaseUnits(walletSession.nativeGasBaseUnits, 18)} {vault.chainType === 'bnb' ? (currentVaultEvmConfig.chainId === 97 ? 'tBNB' : 'BNB') : 'ETH'}
                       </strong>
                     </>
                   )}
@@ -2553,14 +2693,20 @@ export default function Home() {
               <div className="private-form">
                 <div className="chain-info-banner">
                   <span>NETWORK:</span>
-                  <strong>{vault.chainType === 'erc' ? 'EVM / ERC-Compatible' : `${chainConfig.name} (${chainConfig.id})`}</strong>
+                  <strong>
+                    {vault.chainType === 'bnb'
+                      ? (currentVaultEvmConfig.chainId === 56 ? 'BNB Smart Chain Mainnet (BSC)' : 'BNB Chain Testnet (BSC)')
+                      : vault.chainType === 'erc'
+                      ? 'EVM / ERC-Compatible'
+                      : `${chainConfig.name} (${chainConfig.id})`}
+                  </strong>
                 </div>
                 <label>
                   <span>WALLET ADDRESS (OPTIONAL VERIFICATION)</span>
                   <input
                     value={walletSession.manualAddress}
                     onChange={(event) => patchWalletSession(selectedVault, { manualAddress: event.target.value })}
-                    placeholder={vault.chainType === 'erc' ? '0x...' : 'zig1...'}
+                    placeholder={isEvmChain(vault.chainType) ? '0x...' : 'zig1...'}
                     autoComplete="off"
                     spellCheck={false}
                   />
@@ -2605,7 +2751,9 @@ export default function Home() {
               <span className={`vault-badge ${vault.accent}`}>{vault.pair}</span>
               <div>
                 <small>
-                  {vault.chainType === 'erc'
+                  {vault.chainType === 'bnb'
+                    ? (currentVaultEvmConfig.chainId === 56 ? 'BNB SMART CHAIN (BSC)' : 'BNB TESTNET (BSC)')
+                    : vault.chainType === 'erc'
                     ? (currentVaultEvmConfig.chainId === 1 ? 'ETHEREUM MAINNET (EVM)' : 'SEPOLIA TESTNET (EVM)')
                     : 'ZIGCHAIN STRATEGY'}
                 </small>
@@ -2636,11 +2784,11 @@ export default function Home() {
                 <div><span>Token Contract</span><code>{activeVaultAsset.address.slice(0, 10)}…{activeVaultAsset.address.slice(-6)}</code></div>
               )}
               <div><span>Token Balance</span><strong>{walletSession.address ? `${formatBaseUnits(walletSession.balanceBaseUnits, currentTokenDecimals)} ${currentTokenSymbol}` : '—'}</strong></div>
-              {vault.chainType === 'erc' && (
+              {isEvmChain(vault.chainType) && (
                 <div>
-                  <span>ETH Gas Reserve</span>
+                  <span>{vault.chainType === 'bnb' ? (currentVaultEvmConfig.chainId === 97 ? 'tBNB' : 'BNB') : 'ETH'} Gas Reserve</span>
                   <strong className={BigInt(walletSession.nativeGasBaseUnits || '0') === 0n && walletSession.address ? 'gas-zero-warning' : ''}>
-                    {walletSession.address ? `${formatBaseUnits(walletSession.nativeGasBaseUnits, 18)} ETH` : '—'}
+                    {walletSession.address ? `${formatBaseUnits(walletSession.nativeGasBaseUnits, 18)} ${vault.chainType === 'bnb' ? (currentVaultEvmConfig.chainId === 97 ? 'tBNB' : 'BNB') : 'ETH'}` : '—'}
                   </strong>
                 </div>
               )}
@@ -2648,18 +2796,20 @@ export default function Home() {
               <div><span>Total Transferred</span><strong>{formatBaseUnits(totalTransferred, currentTokenDecimals)} {currentTokenSymbol}</strong></div>
               <div><span>Execution Count</span><strong>{successfulHistory.length}</strong></div>
             </div>
-            {vault.chainType === 'erc' && walletSession.address && BigInt(walletSession.nativeGasBaseUnits || '0') === 0n && (
+            {isEvmChain(vault.chainType) && walletSession.address && BigInt(walletSession.nativeGasBaseUnits || '0') === 0n && (
               <div className="gas-warning-notice">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg>
-                <span>Wallet has 0 ETH for gas. Fund your wallet with ETH on this network to execute transactions.</span>
+                <span>Wallet has 0 {vault.chainType === 'bnb' ? (currentVaultEvmConfig.chainId === 97 ? 'tBNB' : 'BNB') : 'ETH'} for gas. Fund your wallet with {vault.chainType === 'bnb' ? (currentVaultEvmConfig.chainId === 97 ? 'tBNB' : 'BNB') : 'ETH'} on this network to execute transactions.</span>
               </div>
             )}
             <div className="interface-banner">
               <span>⌁</span>
               <div>
-                <strong>{vault.address && vault.address !== 'Not configured' ? `${vault.chainType === 'erc' ? 'ERC / EVM' : 'COSMOS'} TRANSFER READY` : 'VAULT_NOT_CONFIGURED'}</strong>
+                <strong>{vault.address && vault.address !== 'Not configured' ? `${vault.chainType === 'bnb' ? 'BNB CHAIN' : vault.chainType === 'erc' ? 'ERC / EVM' : 'COSMOS'} TRANSFER READY` : 'VAULT_NOT_CONFIGURED'}</strong>
                 <small>
-                  {vault.chainType === 'erc'
+                  {vault.chainType === 'bnb'
+                    ? `Transfers execute on ${currentVaultEvmConfig.chainId === 56 ? 'BNB Smart Chain Mainnet' : 'BNB Chain Testnet'} (${currentVaultEvmConfig.rpcUrl}) with direct private key execution.`
+                    : vault.chainType === 'erc'
                     ? `Transfers execute on ${currentVaultEvmConfig.chainId === 1 ? 'Ethereum Mainnet' : 'Sepolia Testnet'} (${currentVaultEvmConfig.rpcUrl}) with direct private key execution.`
                     : `Transfers execute on ${chainConfig.name} with standard Cosmos signing.`}
                 </small>
@@ -2692,7 +2842,7 @@ export default function Home() {
 
           <div className="direction-bar">
             <span className="active">SOURCE WALLET <b>→</b> {vault.name.toUpperCase()}</span>
-            <span>{vault.chainType === 'erc' ? 'EVM TRANSFER' : 'COSMOS TRANSFER'}</span>
+            <span>{vault.chainType === 'bnb' ? 'BNB CHAIN TRANSFER' : vault.chainType === 'erc' ? 'EVM TRANSFER' : 'COSMOS TRANSFER'}</span>
           </div>
 
           {/* Deposit Asset Selector */}
@@ -2890,7 +3040,7 @@ export default function Home() {
                   {entry.hash ? (
                     <a
                       href={
-                        vault.chainType === 'erc'
+                        isEvmChain(vault.chainType)
                           ? `${currentVaultEvmConfig.explorerUrl}/tx/${entry.hash}`
                           : `${chainConfig.explorerUrl}/tx/${entry.hash}`
                       }

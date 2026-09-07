@@ -89,7 +89,7 @@ app.post('/api/vaults/custom', async (request, reply) => {
   const input = z.object({
     name: z.string().min(1).max(64),
     address: z.string().min(1).max(128),
-    chainType: z.enum(['zigchain', 'erc']),
+    chainType: z.enum(['zigchain', 'erc', 'bnb']),
     evmNetwork: z.enum(['mainnet', 'testnet']).optional(),
     tokenSymbol: z.string().min(1).max(16).optional(),
     tokenDecimals: z.coerce.number().int().min(0).max(255).optional(),
@@ -128,6 +128,18 @@ app.get('/api/config/public', async () => ({
     chainId: config.EVM_MAINNET_CHAIN_ID,
     explorerUrl: config.EVM_MAINNET_EXPLORER_URL,
     nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  },
+  bnbMainnet: {
+    rpcUrl: config.BNB_MAINNET_RPC_URL,
+    chainId: config.BNB_MAINNET_CHAIN_ID,
+    explorerUrl: config.BNB_MAINNET_EXPLORER_URL,
+    nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
+  },
+  bnbTestnet: {
+    rpcUrl: config.BNB_TESTNET_RPC_URL,
+    chainId: config.BNB_TESTNET_CHAIN_ID,
+    explorerUrl: config.BNB_TESTNET_EXPLORER_URL,
+    nativeCurrency: { name: 'tBNB', symbol: 'tBNB', decimals: 18 },
   },
   nativeToken: { symbol: config.NATIVE_TOKEN_SYMBOL, denom: config.NATIVE_TOKEN_DENOM, decimals: config.NATIVE_TOKEN_DECIMALS },
   token: { symbol: config.TOKEN_SYMBOL, denom: config.TOKEN_DENOM, decimals: config.TOKEN_DECIMALS },
