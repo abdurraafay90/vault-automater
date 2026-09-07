@@ -1782,61 +1782,87 @@ button {
 }
 
 .frequency-options button {
-  min-width: 58px;
+  min-width: 52px;
   height: 38px;
-  padding: 0 14px;
+  padding: 0 12px;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
   cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .frequency-options button:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .frequency-options button.active {
-  background: #171d2b;
-  color: #fff;
+  background: #172033;
+  color: #38bdf8;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35);
 }
 
 .custom-frequency {
   height: 38px;
-  min-width: 104px;
+  min-width: 108px;
   padding: 0 10px;
-  border: 1px solid transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
   display: flex;
   align-items: center;
   gap: 6px;
   color: var(--text-muted);
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.custom-frequency.active {
-  border-color: rgba(59, 130, 246, 0.4);
-  background: rgba(37, 99, 235, 0.15);
+.custom-frequency:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.custom-frequency:focus-within {
+  border-color: #3b82f6;
+  background: rgba(37, 99, 235, 0.12);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.4);
   color: #fff;
 }
 
+.custom-frequency.active {
+  border-color: rgba(59, 130, 246, 0.6);
+  background: rgba(37, 99, 235, 0.2);
+  color: #60a5fa;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.5), 0 0 12px rgba(59, 130, 246, 0.2);
+}
+
 .custom-frequency input {
-  width: 56px;
+  width: 58px;
   border: 0;
   outline: 0;
   background: transparent;
-  color: inherit;
-  font-size: 11px;
+  color: #fff;
+  font-size: 12px;
   font-weight: 700;
 }
 
+.custom-frequency input::placeholder {
+  color: rgba(255, 255, 255, 0.3);
+  font-weight: 500;
+}
+
 .custom-frequency span {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.custom-frequency.active span {
+  color: #93c5fd;
 }
 
 .execution-strip {

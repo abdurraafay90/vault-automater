@@ -212,25 +212,34 @@ function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig, dyna
     }
   }
 
-  if (targetVault.customAsset && !list.some((existing) => existing.symbol.toLowerCase() === targetVault.customAsset?.symbol.toLowerCase())) {
+  if (targetVault.customAsset && !list.some((existing) => existing.symbol.toLowerCase() === targetVault.customAsset?.symbol.toLowerCase() || (targetVault.customAsset?.address && existing.address?.toLowerCase() === targetVault.customAsset?.address.toLowerCase()))) {
     list.push(targetVault.customAsset);
   }
 
-  const standardTokens = isSepolia
-    ? [SEPOLIA_MUSDC, SEPOLIA_USDC, SEPOLIA_USDT]
-    : [MAINNET_USDT, MAINNET_USDC];
-
-  for (const item of standardTokens) {
-    if (!list.some((existing) => existing.symbol.toLowerCase() === item.symbol.toLowerCase() || (item.address && existing.address?.toLowerCase() === item.address.toLowerCase()))) {
-      list.push(item);
+  // If vault explicitly specified a tokenSymbol (e.g. mUSDC) but it wasn't added yet
+  if (targetVault.tokenSymbol && !list.some((existing) => existing.symbol.toLowerCase() === targetVault.tokenSymbol?.toLowerCase())) {
+    if (isSepolia && targetVault.tokenSymbol.toLowerCase() === 'musdc') {
+      list.push(SEPOLIA_MUSDC);
+    } else {
+      list.push({
+        symbol: targetVault.tokenSymbol,
+        name: `${targetVault.tokenSymbol} (Vault Token)`,
+        decimals: targetVault.tokenDecimals ?? 6,
+        address: targetVault.tokenAddress,
+      });
     }
   }
 
-  // Add any dynamically discovered wallet assets
+  // Add any dynamically discovered wallet assets with positive balance
   for (const item of dynamicAssets) {
     if (!list.some((existing) => existing.symbol.toLowerCase() === item.symbol.toLowerCase() || (item.address && existing.address?.toLowerCase() === item.address?.toLowerCase()))) {
       list.push(item);
     }
+  }
+
+  // Fallback if list is empty
+  if (list.length === 0) {
+    list.push(isSepolia ? SEPOLIA_ETH : NATIVE_ETH);
   }
 
   return list;
@@ -430,8 +439,12 @@ const defaultVaults: Vault[] = [
 ];
 
 const intervals = [
-  { label: '30s', value: 30 }, { label: '60s', value: 60 }, { label: '5m', value: 300 },
-  { label: '15m', value: 900 }, { label: '30m', value: 1800 }, { label: '60m', value: 3600 },
+  { label: '2s', value: 2 },
+  { label: '5s', value: 5 },
+  { label: '10s', value: 10 },
+  { label: '30s', value: 30 },
+  { label: '1m', value: 60 },
+  { label: '5m', value: 300 },
 ];
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
@@ -609,7 +622,11 @@ function hasValidRange(settings: Automation, decimals = defaultTokenConfig.decim
     const minimum = parseTokenAmount(settings.minimum, decimals);
     if (settings.mode === 'once') return minimum > BIGINT_ZERO;
     const maximum = settings.maximum.trim() ? parseTokenAmount(settings.maximum, decimals) : minimum;
-    return maximum >= minimum && Number.isInteger(settings.interval) && settings.interval >= 5;
+    if (settings.customInterval.trim()) {
+      const cust = Number(settings.customInterval.trim());
+      if (Number.isNaN(cust) || cust < 1) return false;
+    }
+    return maximum >= minimum && Number.isInteger(settings.interval) && settings.interval >= 1;
   } catch {
     return false;
   }
@@ -1365,8 +1382,8 @@ export default function Home() {
     const minimum = parseTokenAmount(settings.minimum, decimals);
     const maximum = settings.mode === 'once' ? minimum : settings.maximum.trim() ? parseTokenAmount(settings.maximum, decimals) : minimum;
     if (maximum < minimum) throw new Error('Maximum amount must be greater than or equal to the minimum.');
-    const intervalSec = (settings.interval && settings.interval >= 5) ? settings.interval : 30;
-    if (settings.mode === 'automation' && intervalSec < 5) throw new Error('Frequency must be at least 5 seconds.');
+    const intervalSec = (settings.interval && settings.interval >= 1) ? settings.interval : 30;
+    if (settings.mode === 'automation' && intervalSec < 1) throw new Error('Frequency must be at least 1 second.');
     return { minimum, maximum };
   }
 
@@ -1598,7 +1615,7 @@ export default function Home() {
     clearVaultTimer(index);
     const target = automationsRef.current[index];
     if (!target || target.status !== 'running' || target.mode !== 'automation') return;
-    const intervalSec = (target.interval && target.interval >= 5) ? target.interval : 30;
+    const intervalSec = (target.interval && target.interval >= 1) ? target.interval : 30;
     const intervalMs = intervalSec * 1000;
     const nextAt = unixNow() + intervalMs;
     patchAutomation(index, { nextAt });
@@ -1640,7 +1657,7 @@ export default function Home() {
       if (!target?.address || target.address === 'Not configured') throw new Error('This vault address is not configured.');
 
       clearVaultTimer(index);
-      const intervalSec = (current.interval && current.interval >= 5) ? current.interval : 30;
+      const intervalSec = (current.interval && current.interval >= 1) ? current.interval : 30;
       const nextAt = unixNow() + (intervalSec * 1000);
       patchAutomation(index, { status: 'running', nextAt });
       setTransferStatus(null);
@@ -1693,8 +1710,20 @@ export default function Home() {
   }
 
   function setCustomFrequency(value: string) {
-    const seconds = Number(value);
-    updateSelectedAutomation({ customInterval: value, ...(Number.isInteger(seconds) && seconds >= 5 ? { interval: seconds } : {}) });
+    const trimmed = value.trim();
+    if (!trimmed) {
+      updateSelectedAutomation({ customInterval: '', interval: 30 });
+      return;
+    }
+    const seconds = Number(trimmed);
+    if (!Number.isNaN(seconds) && seconds >= 1) {
+      updateSelectedAutomation({
+        customInterval: value,
+        interval: Math.max(1, Math.floor(seconds)),
+      });
+    } else {
+      updateSelectedAutomation({ customInterval: value });
+    }
   }
 
   async function handleAddVault(event: FormEvent<HTMLFormElement>) {
@@ -1952,7 +1981,7 @@ export default function Home() {
     : !walletSession.hasSigner ? 'The signer is not unlocked for this vault.'
     : !vault.address || vault.address === 'Not configured' ? 'Configure this vault address first.'
     : !automation.minimum.trim() ? 'Enter an amount to enable the transfer button.'
-    : !hasValidRange(automation, currentTokenDecimals) ? automation.mode === 'automation' ? 'Check the amount range and use a frequency of at least 5 seconds.' : `Enter a valid ${currentTokenSymbol} amount.`
+    : !hasValidRange(automation, currentTokenDecimals) ? automation.mode === 'automation' ? 'Check the amount range and use a frequency of at least 1 second.' : `Enter a valid ${currentTokenSymbol} amount.`
     : '';
 
   if (authLoading) return <main className="auth-shell"><div className="auth-loading"><span className="brand-glyph">V</span><p>Loading Vaultflow…</p></div></main>;
@@ -2764,7 +2793,7 @@ export default function Home() {
                   <label className={automation.customInterval ? 'custom-frequency active' : 'custom-frequency'}>
                     <input
                       type="number"
-                      min="5"
+                      min="1"
                       step="1"
                       value={automation.customInterval}
                       disabled={automation.status === 'running' || automation.mode !== 'automation'}
