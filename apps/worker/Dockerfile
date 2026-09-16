@@ -10,9 +10,13 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/shared/package.json packages/shared/package.json
+# packages/database is unused (Prisma/Postgres, never imported) but its
+# package.json must stay listed here: it's an npm workspace per the root
+# package.json glob, so `npm ci` needs it present to resolve the lockfile.
 COPY packages/database/package.json packages/database/package.json
 COPY packages/blockchain-core/package.json packages/blockchain-core/package.json
 COPY packages/blockchain-cosmos/package.json packages/blockchain-cosmos/package.json
+COPY packages/automation/package.json packages/automation/package.json
 
 RUN npm ci
 
@@ -22,9 +26,9 @@ WORKDIR /repo
 
 COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
-COPY packages/database packages/database
 COPY packages/blockchain-core packages/blockchain-core
 COPY packages/blockchain-cosmos packages/blockchain-cosmos
+COPY packages/automation packages/automation
 COPY apps/worker apps/worker
 
 CMD ["npx", "tsx", "apps/worker/src/index.ts"]

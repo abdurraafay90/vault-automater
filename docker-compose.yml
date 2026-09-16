@@ -1,3 +1,14 @@
+# Production deployment (e.g. vault.wickhub.cc):
+#   1. Put a TLS-terminating reverse proxy (Cloudflare Tunnel, Caddy, nginx)
+#      in front of the `web` service — this app only serves plain HTTP.
+#   2. Set APP_ORIGIN, NEXT_PUBLIC_SITE_URL and TRUST_PROXY in .env (see
+#      .env.example). NEXT_PUBLIC_SITE_URL is read at build time, so re-run
+#      `docker compose up -d --build` after changing it.
+#   3. `api` is intentionally not published beyond localhost: the browser only
+#      ever reaches it through `web`'s /api proxy over the internal network.
+#
+# No Postgres/Redis: everything (auth, custom vaults, automation jobs) lives
+# in SQLite under the vaultflow_api_data volume, shared by api and worker.
 services:
   api:
     build:
@@ -6,17 +17,12 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://vaultflow:vaultflow@postgres:5432/vaultflow
-      REDIS_URL: redis://redis:6379
       NODE_ENV: production
-    ports: ["4000:4000"]
+    ports: ["127.0.0.1:4000:4000"]
     volumes: ["vaultflow_api_data:/repo/.data"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
 
+  # Executes scheduled automations and CSV batches. Shares the API's SQLite
+  # volume (where encrypted jobs live). Exactly one worker may run.
   worker:
     build:
       context: .
@@ -24,19 +30,23 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://vaultflow:vaultflow@postgres:5432/vaultflow
-      REDIS_URL: redis://redis:6379
       NODE_ENV: production
+    volumes: ["vaultflow_api_data:/repo/.data"]
+    # On stop, let sends already broadcasting finish and record their result
+    # (confirmation waits up to 10 minutes) before Docker force-kills it.
+    stop_grace_period: 11m
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - api
 
   web:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        # Only affects build-time SEO metadata (canonical link, Open Graph
+        # image resolution) — never used for API calls. Falls back to
+        # localhost when unset, e.g. building without a filled-in .env.
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:4560}
     restart: unless-stopped
     env_file: .env
     environment:
@@ -46,32 +56,5 @@ services:
     depends_on:
       - api
 
-  postgres:
-    image: postgres:17-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: vaultflow
-      POSTGRES_USER: vaultflow
-      POSTGRES_PASSWORD: vaultflow
-    ports: ["5432:5432"]
-    volumes: ["vaultflow_postgres:/var/lib/postgresql/data"]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vaultflow -d vaultflow"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-  redis:
-    image: redis:7.4-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    ports: ["6379:6379"]
-    volumes: ["vaultflow_redis:/data"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
 volumes:
-  vaultflow_postgres:
-  vaultflow_redis:
   vaultflow_api_data:

@@ -136,7 +136,7 @@ export type CustomVault = {
   name: string;
   address: string;
   chainType: 'zigchain' | 'erc' | 'bnb';
-  evmNetwork?: 'mainnet' | 'testnet' | undefined;
+  evmNetwork?: 'mainnet' | undefined;
   tokenSymbol: string;
   tokenDecimals: number;
   tokenAddress?: string | undefined;
@@ -150,7 +150,8 @@ export function listCustomVaults(): CustomVault[] {
     name: String(row.name),
     address: String(row.address),
     chainType: (row.chain_type === 'bnb' ? 'bnb' : row.chain_type === 'erc' ? 'erc' : 'zigchain') as 'zigchain' | 'erc' | 'bnb',
-    evmNetwork: row.evm_network === 'mainnet' ? 'mainnet' : row.evm_network === 'testnet' ? 'testnet' : undefined,
+    // Mainnet-only: legacy testnet rows are normalised to mainnet on read.
+    evmNetwork: row.chain_type === 'erc' || row.chain_type === 'bnb' ? 'mainnet' : undefined,
     tokenAddress: row.token_address ? String(row.token_address) : undefined,
     tokenSymbol: String(row.token_symbol || (row.chain_type === 'bnb' ? 'BNB' : row.chain_type === 'erc' ? 'ETH' : 'ZIG')),
     tokenDecimals: Number(row.token_decimals || (row.chain_type === 'bnb' ? 18 : row.chain_type === 'erc' ? 18 : 6)),
@@ -159,14 +160,14 @@ export function listCustomVaults(): CustomVault[] {
   }));
 }
 
-export function createCustomVault(data: { name: string; address: string; chainType: 'zigchain' | 'erc' | 'bnb'; evmNetwork?: 'mainnet' | 'testnet' | undefined; tokenSymbol?: string | undefined; tokenDecimals?: number | undefined; tokenAddress?: string | undefined; summary?: string | undefined }): CustomVault {
+export function createCustomVault(data: { name: string; address: string; chainType: 'zigchain' | 'erc' | 'bnb'; evmNetwork?: 'mainnet' | undefined; tokenSymbol?: string | undefined; tokenDecimals?: number | undefined; tokenAddress?: string | undefined; summary?: string | undefined }): CustomVault {
   const id = `vault-${randomUUID()}`;
   const createdAt = new Date().toISOString();
   const tokenSymbol = data.tokenSymbol || (data.chainType === 'bnb' ? 'BNB' : data.chainType === 'erc' ? 'ETH' : 'ZIG');
   const tokenDecimals = data.tokenDecimals ?? (data.chainType === 'bnb' ? 18 : data.chainType === 'erc' ? 18 : 6);
   const tokenAddress = data.tokenAddress ? data.tokenAddress.trim() : null;
   const summary = data.summary || `${data.chainType === 'bnb' ? 'BNB Chain' : data.chainType === 'erc' ? 'ERC / EVM' : 'ZIGChain'} custom strategy`;
-  const evmNetwork = (data.chainType === 'erc' || data.chainType === 'bnb') ? (data.evmNetwork || 'testnet') : null;
+  const evmNetwork = (data.chainType === 'erc' || data.chainType === 'bnb') ? 'mainnet' : null;
   database.prepare(`
     INSERT INTO custom_vaults (id, name, address, chain_type, evm_network, token_address, token_symbol, token_decimals, summary, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

@@ -15,7 +15,10 @@ export type VaultAsset = {
   symbol: string;
   name: string;
   decimals: number;
+  /** EVM contract address. Mutually exclusive with `denom`. */
   address?: string;
+  /** Cosmos bank denom (e.g. an ibc/… hash). Required for ZIGChain assets. */
+  denom?: string;
   isNative?: boolean;
   isDetected?: boolean;
   isCustom?: boolean;
@@ -39,7 +42,7 @@ export type Vault = {
   detectedAsset?: VaultAsset | null;
   selectedAssetSymbol?: string;
   customAsset?: VaultAsset | null;
-  evmNetwork?: 'mainnet' | 'testnet';
+  evmNetwork?: 'mainnet';
 };
 
 export interface CsvWalletQueueItem {
@@ -48,9 +51,11 @@ export interface CsvWalletQueueItem {
   privateKey: string;
   amount: string;
   scheduledTime?: string;
-  status: 'Pending' | 'Approving' | 'Depositing' | 'Success' | 'Failed';
+  status: 'Pending' | 'Approving' | 'Depositing' | 'Success' | 'Failed' | 'Cancelled';
   txHash?: string;
   error?: string;
+  /** The CSV line itself could not be read reliably; this row is never sent. */
+  parseError?: string;
 }
 
 type ChainConfig = { name: string; id: string; rpcUrl: string; apiUrl: string; explorerUrl: string };
@@ -93,138 +98,243 @@ const VAULT_DEPOSIT_ABI = [
   'function deposit(uint256 assets, address receiver) returns (uint256)',
 ];
 
-// Presets for Ethereum Mainnet (Chain ID 1)
+// Presets for Ethereum Mainnet (Chain ID 1). USDT/USDC are 6 decimals here.
 const MAINNET_USDT: VaultAsset = { symbol: 'USDT', name: 'Tether USD', address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', decimals: 6, isDetected: true };
 const MAINNET_USDC: VaultAsset = { symbol: 'USDC', name: 'USD Coin', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 };
-const NATIVE_ETH: VaultAsset = { symbol: 'ETH', name: 'Native Ether', decimals: 18, isNative: true };
 
-// Presets for Sepolia Testnet (Chain ID 11155111)
-const SEPOLIA_MUSDC: VaultAsset = { symbol: 'mUSDC', name: 'Mock USD Coin', address: '0xebe4f4ac8a99979934aad3db24edd0caf6a6e934', decimals: 6 };
-const SEPOLIA_USDC: VaultAsset = { symbol: 'USDC', name: 'Sepolia USDC', address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', decimals: 6 };
-const SEPOLIA_USDT: VaultAsset = { symbol: 'USDT', name: 'Sepolia USDT', address: '0xaa8E23Fb10790ea71844564301cD459E5bd33e42', decimals: 6 };
-const SEPOLIA_ETH: VaultAsset = { symbol: 'ETH', name: 'Sepolia Ether', decimals: 18, isNative: true };
-
-// Presets for BNB Chain (BSC Mainnet & Testnet)
-const NATIVE_BNB: VaultAsset = { symbol: 'BNB', name: 'BNB Native Gas', decimals: 18, isNative: true };
-const TESTNET_BNB: VaultAsset = { symbol: 'tBNB', name: 'BNB Testnet Gas', decimals: 18, isNative: true };
+// Presets for BNB Smart Chain (Chain ID 56). Binance-Peg stables are 18 decimals.
 const BSC_MAINNET_USDT: VaultAsset = { symbol: 'USDT', name: 'Binance-Peg BSC-USD', address: '0x55d398326f99059fF775485246999027B3197955', decimals: 18, isDetected: true };
 const BSC_MAINNET_USDC: VaultAsset = { symbol: 'USDC', name: 'Binance-Peg USD Coin', address: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', decimals: 18 };
-const BSC_TESTNET_USDT: VaultAsset = { symbol: 'USDT', name: 'BSC Testnet USDT', address: '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd', decimals: 18, isDetected: true };
-const BSC_TESTNET_USDC: VaultAsset = { symbol: 'USDC', name: 'BSC Testnet USDC', address: '0x64544969ed7EBf5f083679233325356EbE738930', decimals: 18 };
 
 // Presets for ZIGChain
-const ZIGCHAIN_USDC: VaultAsset = { symbol: 'USDC', name: 'Noble USDC', decimals: 6, isDetected: true };
-const ZIGCHAIN_USDT: VaultAsset = { symbol: 'USDT', name: 'Tether USD (IBC)', decimals: 6 };
-const ZIGCHAIN_ZIG: VaultAsset = { symbol: 'ZIG', name: 'ZIG Native Gas', decimals: 6, isNative: true };
+// Noble USDC bridged over transfer/channel-3. The ibc/ hash is
+// SHA256("transfer/channel-3/uusdc"), which is what the chain indexes it under.
+const ZIGCHAIN_USDC_DENOM = 'ibc/6490A7EAB61059BFC1CDDEB05917DD70BDF3A611654162A1A47DB930D40D8AF4';
+const ZIGCHAIN_USDC: VaultAsset = { symbol: 'USDC', name: 'Noble USDC', decimals: 6, denom: ZIGCHAIN_USDC_DENOM, isDetected: true };
+
+const EVM_RPC_TIMEOUT_MS = 10_000;
+
+type RpcEndpoint = {
+  url: string;
+  provider: ethers.JsonRpcProvider;
+  chainCheck: Promise<void> | null;
+  wrongChain: boolean;
+};
+
+/**
+ * True when the error describes the request itself, so every other endpoint
+ * would answer the same way and retrying is pointless (or, for a revert,
+ * misleading). Everything else is treated as an endpoint fault and retried.
+ */
+function isRequestError(error: unknown): boolean {
+  if (
+    ethers.isError(error, 'INSUFFICIENT_FUNDS')
+    || ethers.isError(error, 'NONCE_EXPIRED')
+    || ethers.isError(error, 'REPLACEMENT_UNDERPRICED')
+    || ethers.isError(error, 'TRANSACTION_REPLACED')
+    || ethers.isError(error, 'ACTION_REJECTED')
+    || ethers.isError(error, 'INVALID_ARGUMENT')
+  ) return true;
+  if (ethers.isError(error, 'CALL_EXCEPTION')) {
+    // ethers reports ANY JSON-RPC error on eth_call/estimateGas as
+    // CALL_EXCEPTION ("missing revert data"), including an endpoint refusing
+    // the method (-32601), rate-limiting, or lacking state. Only an actual EVM
+    // execution failure means every node would fail the same way.
+    const rpcError = (error.info as { error?: { message?: unknown } } | undefined)?.error;
+    const message = String(rpcError?.message ?? '');
+    const hasRevertData = typeof error.data === 'string' && error.data !== '0x';
+    if (hasRevertData) return true;
+    if (ENDPOINT_FAULT_PATTERN.test(message)) return false;
+    return EVM_EXECUTION_FAILURE_PATTERN.test(message);
+  }
+  return false;
+}
+
+// Node-side problems another endpoint may not have.
+const ENDPOINT_FAULT_PATTERN = /header not found|missing trie node|rate.?limit|too many requests|not whitelisted|not supported|method not found|unauthori[sz]ed|forbidden|capacity|timeout|timed out|unavailable|internal error/i;
+
+// The EVM itself failed. Includes `assert`-style failures: mainnet USDT's
+// SafeMath uses assert, so an insufficient-balance transfer surfaces as
+// "invalid opcode: INVALID" / "EVM error: InvalidFEOpcode", never as "revert".
+const EVM_EXECUTION_FAILURE_PATTERN = /revert|invalid opcode|InvalidFEOpcode|EVM error|out of gas|gas required exceeds|stack (?:underflow|overflow)|invalid jump|bad jump destination/i;
+
+/** A node rejecting a broadcast because it already has this exact transaction. */
+function isAlreadyBroadcast(error: unknown): boolean {
+  const rpcMessage = String(((error as { info?: { error?: { message?: unknown } } })?.info?.error?.message) ?? '');
+  return ethers.isError(error, 'NONCE_EXPIRED')
+    || /already known|known transaction|already imported/i.test(`${(error as Error)?.message ?? ''} ${rpcMessage}`);
+}
+
+/**
+ * Tries endpoints strictly in listed order. Used instead of ethers'
+ * FallbackProvider, which with quorum 1 treats the first endpoint's *error* as
+ * the answer (so a refusing node fails every contract call) and aborts the
+ * whole provider if any single URL is on the wrong chain.
+ *
+ * - Each endpoint's eth_chainId is verified once; a wrong-chain endpoint is
+ *   skipped permanently rather than served from.
+ * - Endpoint faults (timeouts, HTTP/transport errors, refusals, rate limits)
+ *   fall through to the next endpoint.
+ * - Request errors (reverts, insufficient funds, nonce) are thrown at once.
+ * - Children use staticNetwork, so a dead host fails fast instead of spawning
+ *   an endless network-detection retry loop.
+ */
+class SequentialRpcProvider extends ethers.AbstractProvider {
+  readonly #network: ethers.Network;
+  readonly #endpoints: RpcEndpoint[];
+
+  constructor(urls: string[], chainId: number) {
+    const network = ethers.Network.from(chainId);
+    super(network);
+    this.#network = network;
+    this.#endpoints = urls.map((url) => {
+      const request = new ethers.FetchRequest(url);
+      request.timeout = EVM_RPC_TIMEOUT_MS;
+      return {
+        url,
+        provider: new ethers.JsonRpcProvider(request, network, { staticNetwork: network, batchMaxCount: 1 }),
+        chainCheck: null,
+        wrongChain: false,
+      };
+    });
+  }
+
+  async _detectNetwork(): Promise<ethers.Network> {
+    return this.#network;
+  }
+
+  #verifyChain(endpoint: RpcEndpoint): Promise<void> {
+    endpoint.chainCheck ??= (async () => {
+      const actual = BigInt(await endpoint.provider.send('eth_chainId', []));
+      if (actual !== this.#network.chainId) {
+        endpoint.wrongChain = true;
+        throw new Error(`${endpoint.url} serves chain ${actual}, expected ${this.#network.chainId}.`);
+      }
+    })().catch((error: unknown) => {
+      // A transient failure is re-checked next time; a wrong chain never is.
+      if (!endpoint.wrongChain) endpoint.chainCheck = null;
+      throw error;
+    });
+    return endpoint.chainCheck;
+  }
+
+  async _perform<T = unknown>(req: ethers.PerformActionRequest): Promise<T> {
+    let lastError: unknown = null;
+    let broadcastReachedNode = false;
+    for (const endpoint of this.#endpoints) {
+      if (endpoint.wrongChain) continue;
+      let verified = false;
+      try {
+        await this.#verifyChain(endpoint);
+        verified = true;
+        return await endpoint.provider._perform(req) as T;
+      } catch (error) {
+        // An earlier node may have accepted the transaction before its response
+        // was lost; this node then reports it as known. It is already sent.
+        if (req.method === 'broadcastTransaction' && broadcastReachedNode && isAlreadyBroadcast(error)) {
+          return ethers.Transaction.from(req.signedTransaction).hash as T;
+        }
+        if (verified && isRequestError(error)) throw error;
+        if (verified && req.method === 'broadcastTransaction') broadcastReachedNode = true;
+        lastError = error;
+      }
+    }
+    throw ethers.makeError(`All RPC endpoints failed for ${req.method}.`, 'NETWORK_ERROR', {
+      event: 'rpcFallbackExhausted',
+      info: { lastError },
+    });
+  }
+
+  destroy(): void {
+    for (const endpoint of this.#endpoints) endpoint.provider.destroy();
+    super.destroy();
+  }
+}
+
+/** Provider for an EVM config, failing over across its RPC list in order. */
+function createEvmProvider(evmConf: EvmConfig): ethers.AbstractProvider {
+  const urls = (evmConf.rpcUrls?.length ? evmConf.rpcUrls : [evmConf.rpcUrl]).filter(Boolean);
+  return new SequentialRpcProvider(urls, evmConf.chainId);
+}
 
 async function inspectErc20Token(tokenAddress: string, evmConf?: EvmConfig): Promise<VaultAsset | null> {
   if (!tokenAddress || !/^0x[0-9a-fA-F]{40}$/.test(tokenAddress.trim())) return null;
+  if (!evmConf) return null;
   const cleanAddr = ethers.getAddress(tokenAddress.trim());
-  if (SEPOLIA_MUSDC.address && cleanAddr.toLowerCase() === SEPOLIA_MUSDC.address.toLowerCase()) {
-    return SEPOLIA_MUSDC;
-  }
-  const urls = [
-    ...(evmConf?.rpcUrls || []),
-    evmConf?.rpcUrl,
-    'https://bsc.rpc.blxrbdn.com',
-    'https://bsc-mainnet.gateway.tatum.io',
-    'https://bsc-dataseed.binance.org/',
-    'https://data-seed-prebsc-1-s1.binance.org:8545/',
-    'https://eth-sepolia.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
-    'https://eth-mainnet.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
-  ];
-  const uniqueUrls = Array.from(new Set(urls.filter(Boolean))) as string[];
 
-  for (const url of uniqueUrls) {
+  try {
+    const provider = createEvmProvider(evmConf);
+    const code = await provider.getCode(cleanAddr);
+    if (!code || code === '0x') return null;
+
+    const tokenContract = new ethers.Contract(cleanAddr, ERC20_ABI, provider);
+    const [symbol, name, decimals] = await Promise.all([
+      tokenContract.symbol().catch(() => 'TOKEN'),
+      tokenContract.name().catch(() => 'Token'),
+      tokenContract.decimals().catch(() => 6),
+    ]);
+    return {
+      symbol: String(symbol),
+      name: String(name),
+      decimals: Number(decimals),
+      address: cleanAddr,
+      isCustom: true,
+    };
+  } catch {}
+  return null;
+}
+
+async function detectVaultAsset(vaultAddress: string, evmConf?: EvmConfig): Promise<VaultAsset | null> {
+  if (!vaultAddress || !/^0x[0-9a-fA-F]{40}$/.test(vaultAddress)) return null;
+  if (!evmConf) return null;
+
+  try {
+    const provider = createEvmProvider(evmConf);
+    const code = await provider.getCode(vaultAddress);
+    if (!code || code === '0x') return null;
+
+    let tokenAddress = '';
+    // Try ERC-4626 asset() -> 0x38d52e0f
     try {
-      const provider = new ethers.JsonRpcProvider(url);
-      const code = await provider.getCode(cleanAddr);
-      if (!code || code === '0x') continue;
+      const assetRes = await provider.call({ to: vaultAddress, data: '0x38d52e0f' });
+      if (assetRes && assetRes !== '0x' && assetRes.length >= 66) {
+        const addr = '0x' + assetRes.slice(-40);
+        if (ethers.isAddress(addr) && addr !== ethers.ZeroAddress) {
+          tokenAddress = ethers.getAddress(addr);
+        }
+      }
+    } catch {}
 
-      const tokenContract = new ethers.Contract(cleanAddr, ERC20_ABI, provider);
+    // Fallback: Try token() -> 0xfc0c5465
+    if (!tokenAddress) {
+      try {
+        const tokenRes = await provider.call({ to: vaultAddress, data: '0xfc0c5465' });
+        if (tokenRes && tokenRes !== '0x' && tokenRes.length >= 66) {
+          const addr = '0x' + tokenRes.slice(-40);
+          if (ethers.isAddress(addr) && addr !== ethers.ZeroAddress) {
+            tokenAddress = ethers.getAddress(addr);
+          }
+        }
+      } catch {}
+    }
+
+    if (tokenAddress) {
+      const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
       const [symbol, name, decimals] = await Promise.all([
         tokenContract.symbol().catch(() => 'TOKEN'),
-        tokenContract.name().catch(() => 'Token'),
+        tokenContract.name().catch(() => 'Vault Token'),
         tokenContract.decimals().catch(() => 6),
       ]);
       return {
         symbol: String(symbol),
         name: String(name),
         decimals: Number(decimals),
-        address: cleanAddr,
-        isCustom: true,
+        address: tokenAddress,
+        isDetected: true,
+        isNative: false,
       };
-    } catch {}
-  }
-  return null;
-}
-
-async function detectVaultAsset(vaultAddress: string, evmConf?: EvmConfig): Promise<VaultAsset | null> {
-  if (!vaultAddress || !/^0x[0-9a-fA-F]{40}$/.test(vaultAddress)) return null;
-  const urls = [
-    ...(evmConf?.rpcUrls || []),
-    evmConf?.rpcUrl,
-    'https://bsc.rpc.blxrbdn.com',
-    'https://bsc-mainnet.gateway.tatum.io',
-    'https://bsc-dataseed.binance.org/',
-    'https://data-seed-prebsc-1-s1.binance.org:8545/',
-    'https://eth-mainnet.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
-    'https://eth-sepolia.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
-  ];
-  const uniqueUrls = Array.from(new Set(urls.filter(Boolean))) as string[];
-
-  for (const url of uniqueUrls) {
-    try {
-      const provider = new ethers.JsonRpcProvider(url);
-      const code = await provider.getCode(vaultAddress);
-      if (!code || code === '0x') continue;
-
-      let tokenAddress = '';
-      // Try ERC-4626 asset() -> 0x38d52e0f
-      try {
-        const assetRes = await provider.call({ to: vaultAddress, data: '0x38d52e0f' });
-        if (assetRes && assetRes !== '0x' && assetRes.length >= 66) {
-          const addr = '0x' + assetRes.slice(-40);
-          if (ethers.isAddress(addr) && addr !== ethers.ZeroAddress) {
-            tokenAddress = ethers.getAddress(addr);
-          }
-        }
-      } catch {}
-
-      // Fallback: Try token() -> 0xfc0c5465
-      if (!tokenAddress) {
-        try {
-          const tokenRes = await provider.call({ to: vaultAddress, data: '0xfc0c5465' });
-          if (tokenRes && tokenRes !== '0x' && tokenRes.length >= 66) {
-            const addr = '0x' + tokenRes.slice(-40);
-            if (ethers.isAddress(addr) && addr !== ethers.ZeroAddress) {
-              tokenAddress = ethers.getAddress(addr);
-            }
-          }
-        } catch {}
-      }
-
-      if (tokenAddress) {
-        if (SEPOLIA_MUSDC.address && tokenAddress.toLowerCase() === SEPOLIA_MUSDC.address.toLowerCase()) {
-          return { ...SEPOLIA_MUSDC, isDetected: true };
-        }
-        const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-        const [symbol, name, decimals] = await Promise.all([
-          tokenContract.symbol().catch(() => 'TOKEN'),
-          tokenContract.name().catch(() => 'Vault Token'),
-          tokenContract.decimals().catch(() => 6),
-        ]);
-        return {
-          symbol: String(symbol),
-          name: String(name),
-          decimals: Number(decimals),
-          address: tokenAddress,
-          isDetected: true,
-          isNative: false,
-        };
-      }
-    } catch {}
-  }
+    }
+  } catch {}
   return null;
 }
 
@@ -254,52 +364,28 @@ function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig, dyna
     list.push(targetVault.customAsset);
   }
 
+  // Stablecoins only. Native gas tokens (ZIG / ETH / BNB) are never offered as
+  // a transfer asset — they are held to pay fees.
   if (targetVault.chainType === 'zigchain') {
-    // Make USDT and USDC standard defaults for ZIGChain
+    // USDC is the only stablecoin bridged to ZIGChain; there is no USDT denom
+    // on this chain, so it cannot be offered here.
     if (!list.some((a) => a.symbol === 'USDC')) list.push(ZIGCHAIN_USDC);
-    if (!list.some((a) => a.symbol === 'USDT')) list.push(ZIGCHAIN_USDT);
-    if (!list.some((a) => a.symbol === 'ZIG')) list.push(ZIGCHAIN_ZIG);
-    return list;
+    return list.filter((a) => !a.isNative);
   }
 
-  // EVM chains: Ethereum / EVM and BNB Chain
-  const isSepolia = targetVault.evmNetwork === 'testnet'
-    ? true
-    : targetVault.evmNetwork === 'mainnet'
-    ? false
-    : (evmConf.chainId === 11155111 || evmConf.rpcUrl.includes('sepolia'));
-
+  // EVM mainnets: Ethereum (chain 1) and BNB Smart Chain (chain 56)
   if (targetVault.chainType === 'bnb') {
-    const isBscTestnet = targetVault.evmNetwork === 'testnet' || evmConf.chainId === 97;
-    const defaultUsdt = isBscTestnet ? BSC_TESTNET_USDT : BSC_MAINNET_USDT;
-    const defaultUsdc = isBscTestnet ? BSC_TESTNET_USDC : BSC_MAINNET_USDC;
-    if (!list.some((a) => a.symbol === 'USDT')) list.push(defaultUsdt);
-    if (!list.some((a) => a.symbol === 'USDC')) list.push(defaultUsdc);
-    if (!list.some((a) => a.symbol === 'BNB' || a.symbol === 'tBNB')) {
-      list.push(isBscTestnet ? TESTNET_BNB : NATIVE_BNB);
-    }
+    if (!list.some((a) => a.symbol === 'USDT')) list.push(BSC_MAINNET_USDT);
+    if (!list.some((a) => a.symbol === 'USDC')) list.push(BSC_MAINNET_USDC);
   } else {
-    // Ethereum / EVM
-    const defaultUsdt = isSepolia ? SEPOLIA_USDT : MAINNET_USDT;
-    const defaultUsdc = isSepolia
-      ? (targetVault.tokenSymbol?.toLowerCase() === 'musdc' ? SEPOLIA_MUSDC : SEPOLIA_USDC)
-      : MAINNET_USDC;
-    if (!list.some((a) => a.symbol === 'USDT')) list.push(defaultUsdt);
-    if (!list.some((a) => a.symbol === 'USDC' || a.symbol === 'mUSDC')) list.push(defaultUsdc);
-    if (!list.some((a) => a.symbol === 'ETH')) {
-      list.push(isSepolia ? SEPOLIA_ETH : NATIVE_ETH);
-    }
+    if (!list.some((a) => a.symbol === 'USDT')) list.push(MAINNET_USDT);
+    if (!list.some((a) => a.symbol === 'USDC')) list.push(MAINNET_USDC);
   }
 
-  // If vault explicitly specified another tokenSymbol, ensure it's present
-  if (targetVault.tokenSymbol && !list.some((existing) => existing.symbol.toLowerCase() === targetVault.tokenSymbol?.toLowerCase())) {
-    list.push({
-      symbol: targetVault.tokenSymbol,
-      name: `${targetVault.tokenSymbol} (Vault Token)`,
-      decimals: targetVault.tokenDecimals ?? (targetVault.chainType === 'bnb' ? 18 : 6),
-      address: targetVault.tokenAddress,
-    });
-  }
+  // A vault's tokenSymbol is NOT added as an asset on its own: without a token
+  // contract address it cannot be transferred, and the execution path would
+  // treat an address-less asset as a native ETH/BNB send. A token with an
+  // address is already included above via tokenAddress / customAsset.
 
   // Add any dynamically discovered wallet assets with positive balance
   for (const item of dynamicAssets) {
@@ -308,7 +394,9 @@ function getAvailableAssetsForVault(targetVault: Vault, evmConf: EvmConfig, dyna
     }
   }
 
-  return list;
+  // Stablecoin tokens only: never a native gas token, and never an EVM asset
+  // without a contract address to call.
+  return list.filter((a) => !a.isNative && !!a.address);
 }
 
 function getActiveVaultAsset(targetVault: Vault, evmConf: EvmConfig, dynamicAssets: VaultAsset[] = []): VaultAsset {
@@ -333,7 +421,89 @@ function getActiveVaultAsset(targetVault: Vault, evmConf: EvmConfig, dynamicAsse
 
 type AutomationStatus = 'stopped' | 'running' | 'paused';
 type DeliveryMode = 'once' | 'automation';
-type Automation = { mode: DeliveryMode; minimum: string; maximum: string; interval: number; customInterval: string; status: AutomationStatus; lastAt: number | null; nextAt: number | null };
+type Automation = {
+  mode: DeliveryMode;
+  minimum: string;
+  maximum: string;
+  interval: number;
+  customInterval: string;
+  status: AutomationStatus;
+  lastAt: number | null;
+  nextAt: number | null;
+  /** Id of the server-side automation executing this schedule, if any. */
+  serverId?: string | null;
+  lastError?: string | null;
+  /** The worker is sending for this vault right now. */
+  inFlight?: boolean;
+};
+
+// Server-side automation state (GET /api/automation/state). Execution happens
+// in the worker process, so schedules continue with this tab closed.
+type ServerAutomation = {
+  id: string;
+  vaultKey: string;
+  status: 'running' | 'paused' | 'stopped';
+  minAmount: string;
+  maxAmount: string;
+  intervalSeconds: number;
+  nextRunAt: number | null;
+  lastRunAt: number | null;
+  lastError: string | null;
+  inFlightSince: number | null;
+  createdAt: number;
+};
+type ServerRun = {
+  id: string;
+  vaultKey: string;
+  amountBaseUnits: string;
+  status: 'pending' | 'success' | 'failed';
+  txHash: string | null;
+  error: string | null;
+  startedAt: number;
+};
+type ServerBatchRow = { rowIndex: number; walletAddress: string; amount: string; status: 'pending' | 'sending' | 'success' | 'failed' | 'cancelled'; txHash: string | null; error: string | null };
+type ServerBatch = { id: string; vaultKey: string; status: 'running' | 'completed' | 'cancelled'; delaySeconds: number; rows: ServerBatchRow[] };
+type AutomationServerState = {
+  workerOnline: boolean;
+  encryptionConfigured: boolean;
+  automations: ServerAutomation[];
+  batches: ServerBatch[];
+  runs: ServerRun[];
+};
+
+/** Stable identity for a vault across reloads, shared with the server. */
+function vaultKeyOf(vault: Vault): string {
+  return vault.id ? vault.id : `${vault.chainType}:${(vault.address ?? '').toLowerCase()}`;
+}
+
+const BATCH_ROW_STATUS: Record<ServerBatchRow['status'], CsvWalletQueueItem['status']> = {
+  pending: 'Pending',
+  sending: 'Depositing',
+  success: 'Success',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+};
+
+// TokenX vault TVL (GET /api/vault-stats). Read-only, refreshed server-side
+// every VAULT_STATS_REFRESH_MINUTES (default 30) directly from vaultStats().
+type VaultStatsEntry = {
+  vaultKey: string;
+  vaultName: string;
+  chainType: 'erc' | 'bnb';
+  tvlBaseUnits: string | null;
+  assetSymbol: string | null;
+  assetDecimals: number | null;
+  isPaused: boolean | null;
+  updatedAt: number | null;
+  error: string | null;
+};
+type VaultStatsResponse = { refreshMinutes: number; vaults: VaultStatsEntry[] };
+
+async function readApiError(response: Response): Promise<string> {
+  const data = await response.json().catch(() => ({})) as { code?: string; message?: string; rows?: { row: number; error: string }[] };
+  if (response.status === 401) return 'Your session has expired. Log in again.';
+  return data.message || data.code || `Request failed (HTTP ${response.status}).`;
+}
 type HistoryStatus = 'Pending' | 'Success' | 'Failed';
 type HistoryEntry = { id: string; vaultIndex: number; time: number; amountBaseUnits: bigint; status: HistoryStatus; hash?: string; error?: string; source: 'Manual' | 'Automation' | 'Chain' };
 type AuthUser = { id: string; email: string; role: 'ADMIN' | 'USER'; active: boolean; createdAt: string };
@@ -341,73 +511,61 @@ type WalletSession = { mode: 'private'; source: 'private' | null; address: strin
 
 type UniversalSigner =
   | { type: 'cosmos'; signer: OfflineSigner }
-  | { type: 'evm'; wallet: ethers.Wallet; provider: ethers.JsonRpcProvider };
+  | { type: 'evm'; wallet: ethers.Wallet; provider: ethers.AbstractProvider };
 
 const defaultChainConfig: ChainConfig = {
-  name: 'ZIGChain Testnet',
-  id: 'zig-test-2',
-  rpcUrl: 'https://testnet-rpc.zigchain.com',
-  apiUrl: 'https://testnet-api.zigchain.com',
-  explorerUrl: 'https://testnet.zigscan.org',
+  name: 'ZIGChain',
+  id: 'zigchain-1',
+  rpcUrl: 'https://zigchain-mainnet.zigscan.net',
+  apiUrl: 'https://zigchain-mainnet-lcd.zigscan.net',
+  explorerUrl: 'https://zigscan.org',
 };
 
-const defaultEvmConfig: EvmConfig = {
-  rpcUrl: 'https://eth-sepolia.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
-  chainId: 11155111,
-  explorerUrl: 'https://sepolia.etherscan.io',
-  nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
-};
+// Keyless public mainnet RPCs. Index 0 is primary, the rest are ordered
+// fallbacks used by createEvmProvider. Overridden by the API's /config/public.
+const DEFAULT_ETH_RPC_URLS = [
+  'https://ethereum-rpc.publicnode.com',
+  'https://eth.drpc.org',
+  'https://rpc.mevblocker.io',
+  'https://eth.blockrazor.xyz',
+  'https://eth-pokt.nodies.app',
+  'https://gateway.tenderly.co/public/mainnet',
+];
 
-const defaultEvmTestnetConfig: EvmConfig = {
-  rpcUrl: 'https://eth-sepolia.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
-  chainId: 11155111,
-  explorerUrl: 'https://sepolia.etherscan.io',
-  nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
-};
+const DEFAULT_BSC_RPC_URLS = [
+  'https://bsc-dataseed.binance.org',
+  'https://bsc-rpc.publicnode.com',
+  'https://bsc-dataseed1.defibit.io',
+  'https://bsc-dataseed1.ninicoin.io',
+  'https://bsc-dataseed2.binance.org',
+  'https://bsc.rpc.blxrbdn.com',
+];
 
 const defaultEvmMainnetConfig: EvmConfig = {
-  rpcUrl: 'https://eth-mainnet.g.alchemy.com/v2/-JP0qskklLhdu7bSUgI_K',
+  rpcUrl: DEFAULT_ETH_RPC_URLS[0]!,
   chainId: 1,
   explorerUrl: 'https://etherscan.io',
   nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: DEFAULT_ETH_RPC_URLS,
+  wsUrls: ['wss://ethereum-rpc.publicnode.com'],
 };
 
 const defaultBnbMainnetConfig: EvmConfig = {
-  rpcUrl: 'https://bsc.rpc.blxrbdn.com',
+  rpcUrl: DEFAULT_BSC_RPC_URLS[0]!,
   chainId: 56,
   explorerUrl: 'https://bscscan.com',
   nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
-  rpcUrls: ['https://bsc.rpc.blxrbdn.com', 'https://bsc-mainnet.gateway.tatum.io', 'https://bsc-dataseed.binance.org/'],
-  wsUrls: ['wss://bsc-rpc.publicnode.com', 'wss://bsc.drpc.org'],
-};
-
-const defaultBnbTestnetConfig: EvmConfig = {
-  rpcUrl: 'https://data-seed-prebsc-1-s1.binance.org:8545/',
-  chainId: 97,
-  explorerUrl: 'https://testnet.bscscan.com',
-  nativeCurrency: { name: 'tBNB', symbol: 'tBNB', decimals: 18 },
+  rpcUrls: DEFAULT_BSC_RPC_URLS,
+  wsUrls: ['wss://bsc-rpc.publicnode.com'],
 };
 
 function getVaultEvmConfig(
   targetVault?: Vault | null,
-  fallbackEvm: EvmConfig = defaultEvmConfig,
-  testnetEvm: EvmConfig = defaultEvmTestnetConfig,
   mainnetEvm: EvmConfig = defaultEvmMainnetConfig,
   bnbMainnetEvm: EvmConfig = defaultBnbMainnetConfig,
-  bnbTestnetEvm: EvmConfig = defaultBnbTestnetConfig,
 ): EvmConfig {
-  if (!targetVault) return fallbackEvm;
-  if (targetVault.chainType === 'bnb') {
-    return targetVault.evmNetwork === 'testnet' ? bnbTestnetEvm : bnbMainnetEvm;
-  }
-  if (targetVault.evmNetwork === 'testnet') return testnetEvm;
-  if (targetVault.evmNetwork === 'mainnet') return mainnetEvm;
-
-  const addr = targetVault.address?.toLowerCase() || '';
-  if (addr === '0xe1908800dbefe8a571a8580d9cc546091e6fdf9a') return testnetEvm;
-  if (addr === '0x6fe78b942c566fe2b8d0881cf3577c1b1511f204' || addr === '0x1754fcd1f0ebb306286dd16f00abcf46731a92fc') return mainnetEvm;
-
-  return fallbackEvm;
+  if (targetVault?.chainType === 'bnb') return bnbMainnetEvm;
+  return mainnetEvm;
 }
 
 
@@ -471,24 +629,6 @@ const defaultVaults: Vault[] = [
   },
   {
     pair: 'ERC 1',
-    name: 'Nawa Finance',
-    address: '0x6FE78B942C566fE2b8D0881cf3577C1B1511F204',
-    chainType: 'erc',
-    evmNetwork: 'mainnet',
-    accent: 'green',
-    tvl: '$24,850,000',
-    apy: '12.40%',
-    type: 'Shariah Ethical Yield',
-    risk: 'Low',
-    summary: 'Shariah-compliant ethical asset-backed yield vault (USDT)',
-    tokenSymbol: 'USDT',
-    tokenDecimals: 6,
-    tokenAddress: '0xdAC17F958D2ee523a2206206994597C13D831ec7',
-    detectedAsset: MAINNET_USDT,
-    selectedAssetSymbol: 'USDT',
-  },
-  {
-    pair: 'ERC 2',
     name: 'Valdora',
     address: '0x1754fCD1F0EBb306286dd16F00abCf46731a92FC',
     chainType: 'erc',
@@ -506,35 +646,71 @@ const defaultVaults: Vault[] = [
     selectedAssetSymbol: 'USDT',
   },
   {
-    pair: 'ERC 3',
-    name: 'Sepolia Testnet Vault',
-    address: '0xe1908800dBEFE8a571A8580D9Cc546091e6FDF9a',
+    pair: 'ERC 2',
+    name: 'NAWA',
+    address: '0x3c7C22d108ddbD8190f3CAa3A5BCd99cBD8469e2',
     chainType: 'erc',
-    evmNetwork: 'testnet',
-    accent: 'orange',
-    tvl: '$5,400,000',
-    apy: '14.20%',
-    type: 'Testnet Yield Strategy',
+    evmNetwork: 'mainnet',
+    accent: 'green',
+    tvl: '$24,850,000',
+    apy: '12.40%',
+    type: 'Shariah Ethical Yield',
     risk: 'Low',
-    summary: 'Sepolia EVM testnet vault strategy for testing and automation (USDC)',
-    tokenSymbol: 'USDC',
+    summary: 'Shariah-compliant ethical asset-backed yield wallet (USDT)',
+    tokenSymbol: 'USDT',
     tokenDecimals: 6,
-    tokenAddress: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
-    detectedAsset: SEPOLIA_USDC,
-    selectedAssetSymbol: 'USDC',
+    tokenAddress: '0xdAC17F958D2ee523a2206206994597C13D831ec7',
+    detectedAsset: MAINNET_USDT,
+    selectedAssetSymbol: 'USDT',
+  },
+  {
+    pair: 'ERC 3',
+    name: 'TokenX main wallet',
+    address: '0xe6C1ae22207DCe5C5fE66BEC7A314aa0B55C3e51',
+    chainType: 'erc',
+    evmNetwork: 'mainnet',
+    accent: 'purple',
+    tvl: '$0',
+    apy: '—',
+    type: 'Treasury Wallet',
+    risk: 'Low',
+    summary: 'TokenX main treasury wallet on Ethereum mainnet (USDT)',
+    tokenSymbol: 'USDT',
+    tokenDecimals: 6,
+    tokenAddress: '0xdAC17F958D2ee523a2206206994597C13D831ec7',
+    detectedAsset: MAINNET_USDT,
+    selectedAssetSymbol: 'USDT',
+  },
+  {
+    pair: 'ERC 4',
+    name: 'TokenX admin wallet',
+    address: '0x1dA18CeEDf24dEb656FB85ee40f49c3f698b13c0',
+    chainType: 'erc',
+    evmNetwork: 'mainnet',
+    accent: 'orange',
+    tvl: '$0',
+    apy: '—',
+    type: 'Treasury Wallet',
+    risk: 'Low',
+    summary: 'TokenX admin treasury wallet on Ethereum mainnet (USDT)',
+    tokenSymbol: 'USDT',
+    tokenDecimals: 6,
+    tokenAddress: '0xdAC17F958D2ee523a2206206994597C13D831ec7',
+    detectedAsset: MAINNET_USDT,
+    selectedAssetSymbol: 'USDT',
   },
   {
     pair: 'BNB 1',
-    name: 'PancakeSwap Yield',
-    address: '0x10ED43C718714eb63d5aA57B78B54704E256024E',
+    name: 'TokenX main wallet',
+    address: '0xe6C1ae22207DCe5C5fE66BEC7A314aa0B55C3e51',
     chainType: 'bnb',
     evmNetwork: 'mainnet',
     accent: 'yellow',
-    tvl: '$32,500,000',
-    apy: '15.60%',
-    type: 'DEX Automated Yield',
-    risk: 'Medium',
-    summary: 'Automated yield & liquidity strategy on BNB Smart Chain (USDT)',
+    tvl: '$0',
+    apy: '—',
+    type: 'Treasury Wallet',
+    risk: 'Low',
+    summary: 'TokenX main treasury wallet on BNB Smart Chain (USDT)',
     tokenSymbol: 'USDT',
     tokenDecimals: 18,
     tokenAddress: '0x55d398326f99059fF775485246999027B3197955',
@@ -543,20 +719,20 @@ const defaultVaults: Vault[] = [
   },
   {
     pair: 'BNB 2',
-    name: 'BSC Testnet Strategy',
-    address: '0x9ac64cc6e4415144c455bd8e4837fea55603e5c3',
+    name: 'TokenX admin wallet',
+    address: '0x1dA18CeEDf24dEb656FB85ee40f49c3f698b13c0',
     chainType: 'bnb',
-    evmNetwork: 'testnet',
-    accent: 'yellow',
-    tvl: '$8,200,000',
-    apy: '18.40%',
-    type: 'BSC Testnet Strategy',
+    evmNetwork: 'mainnet',
+    accent: 'gold',
+    tvl: '$0',
+    apy: '—',
+    type: 'Treasury Wallet',
     risk: 'Low',
-    summary: 'BNB Smart Chain Testnet automated vault strategy (USDT)',
+    summary: 'TokenX admin treasury wallet on BNB Smart Chain (USDT)',
     tokenSymbol: 'USDT',
     tokenDecimals: 18,
-    tokenAddress: '0x337610d27c682E347C9cD60BD4b3b107C9d34dDd',
-    detectedAsset: BSC_TESTNET_USDT,
+    tokenAddress: '0x55d398326f99059fF775485246999027B3197955',
+    detectedAsset: BSC_MAINNET_USDT,
     selectedAssetSymbol: 'USDT',
   },
 ];
@@ -573,9 +749,7 @@ const intervals = [
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 const GAS_MULTIPLIER = 1.5;
 const BIGINT_ZERO = BigInt(0);
-const BIGINT_ONE = BigInt(1);
 const BIGINT_TEN = BigInt(10);
-const RANDOM_WORD_BITS = BigInt(32);
 const MILLISECONDS_TO_NANOSECONDS = BigInt(1000000);
 
 function apiRequest(path: string, init: RequestInit = {}) {
@@ -594,7 +768,13 @@ function baseUnitMultiplier(decimals: number) {
 }
 
 function parseTokenAmount(value: string, decimals: number): bigint {
-  const normalized = value.replaceAll(',', '').trim();
+  const trimmed = value.trim();
+  // Commas are accepted only as well-formed thousands separators ("1,000.5").
+  // Stripping them blindly turned a decimal comma ("1,5" meaning 1.5) into 15.
+  if (trimmed.includes(',') && !/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(trimmed)) {
+    throw new Error('Use "." for decimals; commas are only allowed as thousands separators (e.g. 1,000.5).');
+  }
+  const normalized = trimmed.replaceAll(',', '');
   const amountPattern = decimals === 0 ? /^\d+$/ : new RegExp(`^\\d+(\\.\\d{1,${decimals}})?$`);
   if (!amountPattern.test(normalized)) throw new Error(`Enter a valid amount with no more than ${decimals} decimals.`);
   const [whole, fraction = ''] = normalized.split('.');
@@ -607,14 +787,6 @@ function hexToBytes(value: string): Uint8Array {
   const normalized = value.trim().replace(/^0x/i, '');
   if (!/^[0-9a-fA-F]{64}$/.test(normalized)) throw new Error('Use a 32-byte hex private key or a 12/24-word mnemonic.');
   return Uint8Array.from(normalized.match(/.{2}/g)!.map((byte) => Number.parseInt(byte, 16)));
-}
-
-function randomAmount(minimum: bigint, maximum: bigint) {
-  if (minimum === maximum) return minimum;
-  const random = new Uint32Array(2);
-  crypto.getRandomValues(random);
-  const value = (BigInt(random[0]) << RANDOM_WORD_BITS) | BigInt(random[1]);
-  return minimum + (value % (maximum - minimum + BIGINT_ONE));
 }
 
 function formatCountdown(nextAt: number | null, now: number) {
@@ -635,15 +807,22 @@ function formatBlockchainError(error: unknown, chainType: ChainType, symbol = 'E
     return raw;
   }
 
-  // Ethers CALL_EXCEPTION on estimateGas (frequently due to 0 balance or insufficient gas)
+  // Every configured RPC endpoint failed. Checked first: the message names the
+  // failed method (e.g. "estimateGas"), which must not read as a revert below.
+  if (code === 'NETWORK_ERROR' && raw.startsWith('All RPC endpoints failed')) {
+    return 'Network connection error: every configured RPC endpoint failed. Check your internet connection or the RPC list in .env.';
+  }
+
+  // A contract revert. A lack of gas money is reported by ethers as
+  // INSUFFICIENT_FUNDS (handled below), never as CALL_EXCEPTION, so a revert
+  // must not be described as a gas shortage.
   if (
     code === 'CALL_EXCEPTION' ||
     raw.includes('CALL_EXCEPTION') ||
-    raw.includes('estimateGas') ||
     raw.includes('missing revert data')
   ) {
-    if (reason) return `Transaction reverted by network: ${reason}. Check vault contract rules and balance.`;
-    return `Insufficient funds for gas: Your wallet does not have enough ${symbol} to pay for network gas fees and transfer value.`;
+    if (reason) return `Transaction reverted by the contract: ${reason}.`;
+    return `Transaction reverted by the contract with no reason given. Check the vault accepts deposits, the ${symbol} allowance, and your ${symbol} balance.`;
   }
 
   // Insufficient funds / balance
@@ -755,29 +934,62 @@ function hasValidRange(settings: Automation, decimals = defaultTokenConfig.decim
   }
 }
 
+/** Splits one CSV line into fields, honouring double-quoted fields ("1,000.50"). */
+function splitCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i]!;
+    if (quoted) {
+      if (char === '"' && line[i + 1] === '"') { field += '"'; i++; }
+      else if (char === '"') quoted = false;
+      else field += char;
+    } else if (char === '"') quoted = true;
+    else if (char === ',') { fields.push(field); field = ''; }
+    else field += char;
+  }
+  fields.push(field);
+  return fields.map((value) => value.trim());
+}
+
+const CSV_COLUMNS = 4; // wallet_address, private_key, amount, scheduled_time
+
+/**
+ * Every data line becomes a queue row. A row that cannot be read reliably is
+ * kept and marked Failed with its reason (and never sent), instead of being
+ * dropped silently or blocking the other rows.
+ */
 function parseWalletCsv(text: string): CsvWalletQueueItem[] {
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  const lines = text.replace(/^﻿/, '').split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
   if (lines.length === 0) return [];
 
   const items: CsvWalletQueueItem[] = [];
-  const firstLineLower = lines[0].toLowerCase();
+  const firstLineLower = lines[0]!.toLowerCase();
   const startIndex = firstLineLower.includes('wallet_address') || firstLineLower.includes('address') || firstLineLower.includes('wallet') ? 1 : 0;
 
   for (let i = startIndex; i < lines.length; i++) {
-    const rawCols = lines[i].split(',').map((col) => col.trim().replace(/^["']|["']$/g, ''));
-    if (rawCols.length >= 3) {
-      const [address, privateKey, amount, scheduledTime] = rawCols;
-      if (address && privateKey && amount) {
-        items.push({
-          id: `csv-${i}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          address,
-          privateKey,
-          amount,
-          scheduledTime: scheduledTime || undefined,
-          status: 'Pending',
-        });
-      }
-    }
+    const cols = splitCsvLine(lines[i]!);
+    if (cols.every((col) => !col)) continue; // a line of only commas
+    const [address = '', privateKey = '', amount = '', scheduledTime = ''] = cols;
+    // An unquoted amount like 1,000.50 splits across columns; reading it as
+    // "1" would send the wrong amount, so the row is refused instead. The
+    // split can land in the unused scheduled_time column (e.g. with a trailing
+    // comma), so also catch a 1-3 digit amount followed by a "000[.xx]" piece.
+    const tooManyColumns = cols.length > CSV_COLUMNS && cols.slice(CSV_COLUMNS).some(Boolean);
+    const splitThousands = /^\d{1,3}$/.test(amount) && /^\d{3}(\.\d+)?$/.test(cols[3] ?? '');
+    const parseError = tooManyColumns || splitThousands
+      ? `Line ${i + 1}: the amount looks split by a comma (read "${amount}", then "${cols[3] ?? ''}"). Put amounts with commas in quotes, e.g. "1,000.50", or write 1000.50.`
+      : undefined;
+    items.push({
+      id: `csv-${i}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      address,
+      privateKey,
+      amount,
+      scheduledTime: scheduledTime || undefined,
+      status: parseError ? 'Failed' : 'Pending',
+      ...(parseError ? { error: parseError, parseError } : {}),
+    });
   }
   return items;
 }
@@ -785,11 +997,8 @@ function parseWalletCsv(text: string): CsvWalletQueueItem[] {
 export default function Home() {
   const [vaults, setVaults] = useState<Vault[]>(defaultVaults);
   const [chainConfig, setChainConfig] = useState<ChainConfig>(defaultChainConfig);
-  const [evmConfig, setEvmConfig] = useState<EvmConfig>(defaultEvmConfig);
-  const [evmTestnetConfig, setEvmTestnetConfig] = useState<EvmConfig>(defaultEvmTestnetConfig);
   const [evmMainnetConfig, setEvmMainnetConfig] = useState<EvmConfig>(defaultEvmMainnetConfig);
   const [bnbMainnetConfig, setBnbMainnetConfig] = useState<EvmConfig>(defaultBnbMainnetConfig);
-  const [bnbTestnetConfig, setBnbTestnetConfig] = useState<EvmConfig>(defaultBnbTestnetConfig);
   const [transferToken, setTransferToken] = useState<TokenConfig>(defaultTokenConfig);
   const [nativeToken, setNativeToken] = useState<TokenConfig>(defaultTokenConfig);
   const [ibcTransfer, setIbcTransfer] = useState<IbcTransferConfig>(defaultIbcTransferConfig);
@@ -821,7 +1030,6 @@ export default function Home() {
   const [sidebarFilter, setSidebarFilter] = useState<'all' | 'zigchain' | 'erc' | 'bnb'>('all');
   const [newVaultName, setNewVaultName] = useState('');
   const [newVaultChain, setNewVaultChain] = useState<ChainType>('zigchain');
-  const [newVaultEvmNetwork, setNewVaultEvmNetwork] = useState<'testnet' | 'mainnet'>('testnet');
   const [newVaultAddress, setNewVaultAddress] = useState('');
   const [newVaultSummary, setNewVaultSummary] = useState('');
   const [newVaultSymbol, setNewVaultSymbol] = useState('');
@@ -849,7 +1057,6 @@ export default function Home() {
   const [batchActiveIndex, setBatchActiveIndex] = useState<number | null>(null);
   const [csvLoading, setCsvLoading] = useState(false);
   const [csvError, setCsvError] = useState<string | null>(null);
-  const batchCancelRef = useRef(false);
   const csvFileInputRef = useRef<HTMLInputElement>(null);
 
   const secretInputRef = useRef<HTMLInputElement>(null);
@@ -857,24 +1064,30 @@ export default function Home() {
   const walletSessionsRef = useRef<WalletSession[]>(walletSessions);
   const vaultsRef = useRef<Vault[]>(defaultVaults);
   const chainConfigRef = useRef<ChainConfig>(defaultChainConfig);
-  const evmConfigRef = useRef<EvmConfig>(defaultEvmConfig);
-  const evmTestnetConfigRef = useRef<EvmConfig>(defaultEvmTestnetConfig);
   const evmMainnetConfigRef = useRef<EvmConfig>(defaultEvmMainnetConfig);
   const bnbMainnetConfigRef = useRef<EvmConfig>(defaultBnbMainnetConfig);
-  const bnbTestnetConfigRef = useRef<EvmConfig>(defaultBnbTestnetConfig);
   const transferTokenRef = useRef<TokenConfig>(defaultTokenConfig);
   const nativeTokenRef = useRef<TokenConfig>(defaultTokenConfig);
   const ibcTransferRef = useRef<IbcTransferConfig>(defaultIbcTransferConfig);
   const automationsRef = useRef<Automation[]>(automations);
-  const timersRef = useRef<Record<number, ReturnType<typeof setTimeout> | null>>({});
   const transferQueueRef = useRef<Record<number, Promise<boolean>>>({});
+  // The unlocked key, kept in memory only so it can be handed to the server
+  // when an automation starts (the in-memory signer cannot export it).
+  const signerSecretsRef = useRef<Record<number, string>>({});
+  const [serverState, setServerState] = useState<AutomationServerState | null>(null);
+  const [vaultStats, setVaultStats] = useState<VaultStatsResponse | null>(null);
+  // Which submitted batch the CSV queue is showing, and which queue rows it sent.
+  const batchRowMapRef = useRef<{ batchId: string; vaultKey: string; queueIndexes: number[] } | null>(null);
+  const seenRunIdsRef = useRef<Set<string> | null>(null);
+  const selectedVaultRef = useRef(selectedVault);
+  selectedVaultRef.current = selectedVault;
   const sessionGenerationRef = useRef<Record<number, number>>({});
 
   const vault = vaults[selectedVault] ?? vaults[0];
   const automation = automations[selectedVault] ?? { mode: 'once', minimum: '', maximum: '', interval: 30, customInterval: '', status: 'stopped', lastAt: null, nextAt: null };
   const walletSession = walletSessions[selectedVault] ?? { mode: 'private', source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false };
 
-  const currentVaultEvmConfig = getVaultEvmConfig(vault, evmConfig, evmTestnetConfig, evmMainnetConfig, bnbMainnetConfig, bnbTestnetConfig);
+  const currentVaultEvmConfig = getVaultEvmConfig(vault, evmMainnetConfig, bnbMainnetConfig);
   const activeVaultAsset = getActiveVaultAsset(vault, currentVaultEvmConfig, walletDiscoveredAssets);
   const currentTokenSymbol = activeVaultAsset.symbol;
   const currentTokenDecimals = activeVaultAsset.decimals;
@@ -920,8 +1133,8 @@ export default function Home() {
     const timer = setTimeout(async () => {
       try {
         const targetEvm = newVaultChain === 'bnb'
-          ? (newVaultEvmNetwork === 'mainnet' ? bnbMainnetConfigRef.current : bnbTestnetConfigRef.current)
-          : (newVaultEvmNetwork === 'mainnet' ? evmMainnetConfigRef.current : evmTestnetConfigRef.current);
+          ? bnbMainnetConfigRef.current
+          : evmMainnetConfigRef.current;
         const detected = await detectVaultAsset(newVaultAddress.trim(), targetEvm);
         if (active) {
           setDetectedAddVaultAsset(detected);
@@ -941,7 +1154,7 @@ export default function Home() {
       active = false;
       clearTimeout(timer);
     };
-  }, [newVaultAddress, newVaultChain, newVaultEvmNetwork]);
+  }, [newVaultAddress, newVaultChain]);
 
   // Live ERC-20 / BEP-20 token inspection when specifying custom token address in Add Vault modal
   useEffect(() => {
@@ -954,8 +1167,8 @@ export default function Home() {
     const timer = setTimeout(async () => {
       try {
         const targetEvm = newVaultChain === 'bnb'
-          ? (newVaultEvmNetwork === 'mainnet' ? bnbMainnetConfigRef.current : bnbTestnetConfigRef.current)
-          : (newVaultEvmNetwork === 'mainnet' ? evmMainnetConfigRef.current : evmTestnetConfigRef.current);
+          ? bnbMainnetConfigRef.current
+          : evmMainnetConfigRef.current;
         const inspected = await inspectErc20Token(newVaultTokenAddress.trim(), targetEvm);
         if (active) {
           setInspectedTokenInfo(inspected);
@@ -975,7 +1188,7 @@ export default function Home() {
       active = false;
       clearTimeout(timer);
     };
-  }, [newVaultTokenAddress, newVaultChain, newVaultEvmNetwork]);
+  }, [newVaultTokenAddress, newVaultChain]);
 
   // Dynamically auto-detect accepted token for currently selected vault if it doesn't have detectedAsset yet
   useEffect(() => {
@@ -985,7 +1198,7 @@ export default function Home() {
     let active = true;
     void (async () => {
       try {
-        const vaultEvm = getVaultEvmConfig(vault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
+        const vaultEvm = getVaultEvmConfig(vault, evmMainnetConfigRef.current, bnbMainnetConfigRef.current);
         const detected = await detectVaultAsset(vault.address!, vaultEvm);
         if (active && detected) {
           setVaults((cur) =>
@@ -1033,13 +1246,56 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const timers = timersRef.current;
+    // Display clock only (countdowns). Scheduling itself runs in the worker.
     const ticker = window.setInterval(() => setNow(unixNow()), 1000);
-    return () => {
-      window.clearInterval(ticker);
-      Object.values(timers).forEach((timer) => timer && clearTimeout(timer));
-    };
+    return () => window.clearInterval(ticker);
   }, []);
+
+  // Mirror server-side automation state into the console. Polling (not the
+  // tab) is all that stops when the tab closes; the worker keeps sending.
+  useEffect(() => {
+    if (!authUser) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await apiRequest('/api/automation/state');
+        if (!response.ok || cancelled) return;
+        applyServerState(await response.json() as AutomationServerState);
+      } catch {
+        // Transient; the next poll retries.
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => void poll(), 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+    // applyServerState reads only refs and stable setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser]);
+
+  // TokenX vault TVL. The backend only refreshes every ~30 minutes, so a 60s
+  // client poll is just to pick that up promptly — not a live feed.
+  useEffect(() => {
+    if (!authUser) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await apiRequest('/api/vault-stats');
+        if (!response.ok || cancelled) return;
+        setVaultStats(await response.json() as VaultStatsResponse);
+      } catch {
+        // Transient; the next poll retries.
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => void poll(), 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [authUser]);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -1078,10 +1334,113 @@ export default function Home() {
     setWalletSessions(next);
   }
 
-  function clearVaultTimer(index: number) {
-    const timer = timersRef.current[index];
-    if (timer) clearTimeout(timer);
-    timersRef.current[index] = null;
+  function applyServerState(data: AutomationServerState) {
+    setServerState(data);
+    const currentVaults = vaultsRef.current;
+    const indexByKey = new Map(currentVaults.map((v, i) => [vaultKeyOf(v), i] as const));
+
+    // Automations: the newest server automation per vault drives that vault's panel.
+    currentVaults.forEach((targetVault, index) => {
+      const key = vaultKeyOf(targetVault);
+      const server = data.automations
+        .filter((item) => item.vaultKey === key)
+        .sort((a, b) => b.createdAt - a.createdAt)[0];
+      const local = automationsRef.current[index];
+      if (server && server.status !== 'stopped') {
+        const presetInterval = intervals.some((option) => option.value === server.intervalSeconds);
+        const patch: Partial<Automation> = {
+          mode: 'automation',
+          status: server.status,
+          nextAt: server.nextRunAt,
+          lastAt: server.lastRunAt,
+          serverId: server.id,
+          lastError: server.lastError,
+          inFlight: server.inFlightSince !== null,
+          minimum: server.minAmount,
+          maximum: server.maxAmount,
+          interval: server.intervalSeconds,
+          customInterval: presetInterval ? '' : String(server.intervalSeconds),
+        };
+        const changed = !local || (Object.keys(patch) as (keyof Automation)[]).some((field) => local[field] !== patch[field]);
+        if (changed) {
+          // Surface a failure that paused the selected vault's schedule.
+          if (local?.status === 'running' && server.status === 'paused' && server.lastError && index === selectedVaultRef.current) {
+            setTransferStatus({ kind: 'error', message: `Automation paused: ${server.lastError}` });
+          }
+          patchAutomation(index, patch);
+        }
+      } else if (local?.serverId) {
+        patchAutomation(index, { status: 'stopped', nextAt: null, serverId: null, inFlight: false, lastAt: server?.lastRunAt ?? local.lastAt, lastError: server?.lastError ?? null });
+      }
+    });
+
+    // Run history from the server replaces earlier server entries.
+    const runEntries: HistoryEntry[] = data.runs.flatMap((run) => {
+      const vaultIndex = indexByKey.get(run.vaultKey);
+      if (vaultIndex === undefined) return [];
+      return [{
+        id: `run-${run.id}`,
+        vaultIndex,
+        time: run.startedAt,
+        amountBaseUnits: BigInt(run.amountBaseUnits),
+        status: run.status === 'success' ? 'Success' : run.status === 'failed' ? 'Failed' : 'Pending',
+        ...(run.txHash ? { hash: run.txHash } : {}),
+        ...(run.error ? { error: run.error } : {}),
+        source: 'Automation',
+      } satisfies HistoryEntry];
+    });
+    setHistory((current) => [...runEntries, ...current.filter((entry) => !entry.id.startsWith('run-'))]
+      .sort((a, b) => b.time - a.time)
+      .slice(0, 200));
+
+    // Refresh a wallet's balance when a server send for its vault succeeds.
+    const successIds = data.runs.filter((run) => run.status === 'success').map((run) => run.id);
+    if (seenRunIdsRef.current) {
+      for (const run of data.runs) {
+        if (run.status !== 'success' || seenRunIdsRef.current.has(run.id)) continue;
+        const vaultIndex = indexByKey.get(run.vaultKey);
+        const address = vaultIndex === undefined ? '' : walletSessionsRef.current[vaultIndex]?.address;
+        if (vaultIndex !== undefined && address) void loadBalance(vaultIndex, address);
+      }
+    }
+    seenRunIdsRef.current = new Set(successIds);
+
+    // CSV batch progress.
+    let mapping = batchRowMapRef.current;
+    if (!mapping) {
+      // After a reload, show a batch still running for the selected vault.
+      const selected = currentVaults[selectedVaultRef.current];
+      const running = selected ? data.batches.find((b) => b.status === 'running' && b.vaultKey === vaultKeyOf(selected)) : undefined;
+      if (running) {
+        mapping = { batchId: running.id, vaultKey: running.vaultKey, queueIndexes: running.rows.map((_, i) => i) };
+        batchRowMapRef.current = mapping;
+        setCsvQueue(running.rows.map((row) => ({
+          id: `server-${running.id}-${row.rowIndex}`,
+          address: row.walletAddress,
+          privateKey: '',
+          amount: row.amount,
+          status: BATCH_ROW_STATUS[row.status],
+        })));
+      }
+    }
+    if (mapping) {
+      const batch = data.batches.find((b) => b.id === mapping!.batchId);
+      if (batch) {
+        const queueIndexes = mapping.queueIndexes;
+        setCsvQueue((queue) => queue.map((item, queueIndex) => {
+          const rowIndex = queueIndexes.indexOf(queueIndex);
+          const row = rowIndex >= 0 ? batch.rows[rowIndex] : undefined;
+          if (!row) return item;
+          const next: CsvWalletQueueItem = { ...item, status: BATCH_ROW_STATUS[row.status] };
+          if (row.txHash) next.txHash = row.txHash; else delete next.txHash;
+          if (row.error) next.error = row.error; else delete next.error;
+          return next;
+        }));
+        const active = batch.rows.find((row) => row.status === 'sending') ?? (batch.status === 'running' ? batch.rows.find((row) => row.status === 'pending') : undefined);
+        setBatchRunning(batch.status === 'running');
+        setBatchActiveIndex(active ? queueIndexes[active.rowIndex] ?? null : null);
+      }
+    }
   }
 
   async function loadPublicConfig() {
@@ -1090,23 +1449,17 @@ export default function Home() {
       if (!response.ok) throw new Error('Configuration service unavailable.');
       const data = await response.json() as {
         chain?: ChainConfig;
-        evm?: EvmConfig;
-        evmTestnet?: EvmConfig;
         evmMainnet?: EvmConfig;
         bnbMainnet?: EvmConfig;
-        bnbTestnet?: EvmConfig;
         nativeToken?: TokenConfig;
         token?: TokenConfig;
         ibcTransfer?: IbcTransferConfig;
-        vaults: Array<{ name: string; address: string | null; chainType?: ChainType; evmNetwork?: 'mainnet' | 'testnet' }>;
+        vaults: Array<{ name: string; address: string | null; chainType?: ChainType; evmNetwork?: 'mainnet' }>;
       };
 
       const nextChainConfig = data.chain ?? defaultChainConfig;
-      const nextEvmConfig = data.evm ?? defaultEvmConfig;
-      const nextEvmTestnetConfig = data.evmTestnet ?? defaultEvmTestnetConfig;
       const nextEvmMainnetConfig = data.evmMainnet ?? defaultEvmMainnetConfig;
       const nextBnbMainnetConfig = data.bnbMainnet ?? defaultBnbMainnetConfig;
-      const nextBnbTestnetConfig = data.bnbTestnet ?? defaultBnbTestnetConfig;
       const nextTransferToken = data.token ?? defaultTokenConfig;
       const nextNativeToken = data.nativeToken ?? defaultTokenConfig;
       const nextIbcTransfer = data.ibcTransfer ?? defaultIbcTransferConfig;
@@ -1125,11 +1478,11 @@ export default function Home() {
       try {
         const customRes = await apiRequest('/api/vaults/custom');
         if (customRes.ok) {
-          const customData = await customRes.json() as { vaults: Array<{ id: string; name: string; address: string; chainType: ChainType; evmNetwork?: 'mainnet' | 'testnet'; tokenAddress?: string; tokenSymbol?: string; tokenDecimals?: number; summary?: string }> };
+          const customData = await customRes.json() as { vaults: Array<{ id: string; name: string; address: string; chainType: ChainType; evmNetwork?: 'mainnet'; tokenAddress?: string; tokenSymbol?: string; tokenDecimals?: number; summary?: string }> };
           customVaults = customData.vaults.map((cv, i) => {
-            const resolvedAddress = cv.tokenAddress || (cv.chainType === 'erc' && (cv.tokenSymbol?.toLowerCase() === 'musdc') ? SEPOLIA_MUSDC.address : undefined);
+            const resolvedAddress = cv.tokenAddress;
             const pairLabel = cv.chainType === 'bnb' ? `BNB ${i + 3}` : cv.chainType === 'erc' ? `ERC ${i + 3}` : `CUSTOM ${i + 1}`;
-            const accentColor = cv.chainType === 'bnb' ? 'yellow' : cv.chainType === 'erc' ? (cv.evmNetwork === 'mainnet' ? 'green' : 'cyan') : 'blue';
+            const accentColor = cv.chainType === 'bnb' ? 'yellow' : cv.chainType === 'erc' ? 'green' : 'blue';
             return {
               id: cv.id,
               pair: pairLabel,
@@ -1163,10 +1516,6 @@ export default function Home() {
       try {
         const localCustom = JSON.parse(localStorage.getItem('vaultflow_custom_vaults') || '[]') as Vault[];
         localCustom.forEach((lv) => {
-          if (lv.tokenSymbol?.toLowerCase() === 'musdc' && !lv.tokenAddress) {
-            lv.tokenAddress = SEPOLIA_MUSDC.address;
-            lv.customAsset = { ...SEPOLIA_MUSDC, isCustom: true };
-          }
           if (!customVaults.some((cv) => cv.address === lv.address || cv.id === lv.id)) {
             customVaults.push(lv);
           }
@@ -1184,21 +1533,15 @@ export default function Home() {
       const allVaults = allVaultsFiltered.length > 0 ? allVaultsFiltered : baseVaults;
 
       chainConfigRef.current = nextChainConfig;
-      evmConfigRef.current = nextEvmConfig;
-      evmTestnetConfigRef.current = nextEvmTestnetConfig;
       evmMainnetConfigRef.current = nextEvmMainnetConfig;
       bnbMainnetConfigRef.current = nextBnbMainnetConfig;
-      bnbTestnetConfigRef.current = nextBnbTestnetConfig;
       setBnbMainnetConfig(nextBnbMainnetConfig);
-      setBnbTestnetConfig(nextBnbTestnetConfig);
       transferTokenRef.current = nextTransferToken;
       nativeTokenRef.current = nextNativeToken;
       ibcTransferRef.current = nextIbcTransfer;
       vaultsRef.current = allVaults;
 
       setChainConfig(nextChainConfig);
-      setEvmConfig(nextEvmConfig);
-      setEvmTestnetConfig(nextEvmTestnetConfig);
       setEvmMainnetConfig(nextEvmMainnetConfig);
       setTransferToken(nextTransferToken);
       setNativeToken(nextNativeToken);
@@ -1225,8 +1568,8 @@ export default function Home() {
 
     if (isEvmChain(currentVault.chainType)) {
       try {
-        const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
-        const provider = new ethers.JsonRpcProvider(vaultEvm.rpcUrl);
+        const vaultEvm = getVaultEvmConfig(currentVault, evmMainnetConfigRef.current, bnbMainnetConfigRef.current);
+        const provider = createEvmProvider(vaultEvm);
         const activeAsset = getActiveVaultAsset(currentVault, vaultEvm, walletDiscoveredAssetsRef.current);
 
         let gasWei = 0n;
@@ -1280,12 +1623,8 @@ export default function Home() {
                 for (const tb of nonZero) {
                   try {
                     const cAddr = ethers.getAddress(tb.contractAddress);
-                    if (SEPOLIA_MUSDC.address && cAddr.toLowerCase() === SEPOLIA_MUSDC.address.toLowerCase()) {
-                      found.push(SEPOLIA_MUSDC);
-                    } else {
-                      const inspected = await inspectErc20Token(cAddr, vaultEvm);
-                      if (inspected) found.push(inspected);
-                    }
+                    const inspected = await inspectErc20Token(cAddr, vaultEvm);
+                    if (inspected) found.push(inspected);
                   } catch {}
                 }
                 if (found.length > 0) {
@@ -1310,9 +1649,11 @@ export default function Home() {
       return;
     }
 
-    // Cosmos / ZIGChain
+    // Cosmos / ZIGChain. The spendable balance is the SELECTED asset's denom
+    // (Noble USDC), while gas is tracked separately in the native denom.
     try {
-      const transferDenom = transferTokenRef.current.denom;
+      const zigAsset = currentVault ? getActiveVaultAsset(currentVault, defaultEvmMainnetConfig, walletDiscoveredAssetsRef.current) : null;
+      const transferDenom = zigAsset?.denom ?? transferTokenRef.current.denom;
       const gasDenom = nativeTokenRef.current.denom;
       const [transferResponse, gasResponse] = await Promise.all([
         apiRequest(`/api/wallet/${encodeURIComponent(address)}/balance?denom=${encodeURIComponent(transferDenom)}`),
@@ -1371,8 +1712,8 @@ export default function Home() {
       if (!currentVault) throw new Error('Vault not selected.');
 
       if (isEvmChain(currentVault.chainType)) {
-        const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
-        const provider = new ethers.JsonRpcProvider(vaultEvm.rpcUrl);
+        const vaultEvm = getVaultEvmConfig(currentVault, evmMainnetConfigRef.current, bnbMainnetConfigRef.current);
+        const provider = createEvmProvider(vaultEvm);
         let wallet: ethers.Wallet;
         if (secret.includes(' ')) {
           const hd = ethers.HDNodeWallet.fromPhrase(secret);
@@ -1390,6 +1731,7 @@ export default function Home() {
           throw new Error(`The key belongs to ${derivedAddress}, not the entered address.`);
         }
         signersRef.current[index] = { type: 'evm', wallet, provider };
+        signerSecretsRef.current[index] = secret;
         patchWalletSession(index, { source: 'private', address: derivedAddress, manualAddress: derivedAddress, hasSigner: true });
         await loadBalance(index, derivedAddress, generation);
       } else {
@@ -1403,6 +1745,7 @@ export default function Home() {
           throw new Error(`The key belongs to ${account.address}, not the entered address.`);
         }
         signersRef.current[index] = { type: 'cosmos', signer };
+        signerSecretsRef.current[index] = secret;
         patchWalletSession(index, { source: 'private', address: account.address, manualAddress: account.address, hasSigner: true });
         await loadBalance(index, account.address, generation);
         void loadHistory(index, account.address, generation);
@@ -1411,40 +1754,63 @@ export default function Home() {
       if (secretInputRef.current) secretInputRef.current.value = '';
     } catch (error) {
       signersRef.current[index] = null;
+      delete signerSecretsRef.current[index];
       patchWalletSession(index, { hasSigner: false, error: error instanceof Error ? error.message : 'Could not unlock this wallet.' });
     } finally {
       patchWalletSession(index, { unlocking: false });
     }
   }
 
+  /** Pause / resume / stop a server automation and reflect the result. */
+  async function automationAction(index: number, action: 'pause' | 'resume' | 'stop'): Promise<boolean> {
+    const serverId = automationsRef.current[index]?.serverId;
+    if (!serverId) {
+      // Nothing was started on the server; just reset the local panel.
+      if (action !== 'resume') patchAutomation(index, { status: action === 'pause' ? 'paused' : 'stopped', nextAt: null });
+      return true;
+    }
+    try {
+      const response = await apiRequest(`/api/automations/${encodeURIComponent(serverId)}/${action}`, { method: 'POST' });
+      if (!response.ok) throw new Error(await readApiError(response));
+      const data = await response.json() as { automation: ServerAutomation };
+      const server = data.automation;
+      patchAutomation(index, server.status === 'stopped'
+        ? { status: 'stopped', nextAt: null, serverId: null, inFlight: false }
+        : { status: server.status, nextAt: server.nextRunAt, lastError: server.lastError, inFlight: server.inFlightSince !== null });
+      return true;
+    } catch (error) {
+      setTransferStatus({ kind: 'error', message: error instanceof Error ? error.message : `Could not ${action} the automation.` });
+      return false;
+    }
+  }
+
   function stopAutomation(index: number) {
-    clearVaultTimer(index);
-    patchAutomation(index, { status: 'stopped', nextAt: null });
+    return automationAction(index, 'stop');
   }
 
   function pauseAutomation(index: number) {
-    clearVaultTimer(index);
-    patchAutomation(index, { status: 'paused', nextAt: null });
+    return automationAction(index, 'pause');
   }
 
   function stopAll() {
-    vaults.forEach((_, index) => clearVaultTimer(index));
-    const next = automationsRef.current.map((item) => ({ ...item, status: 'stopped' as const, nextAt: null }));
-    automationsRef.current = next;
-    setAutomations(next);
+    automationsRef.current.forEach((item, index) => {
+      if (item.status !== 'stopped') void automationAction(index, 'stop');
+    });
   }
 
   function pauseAll() {
-    vaults.forEach((_, index) => clearVaultTimer(index));
-    const next = automationsRef.current.map((item) => item.status === 'running' ? { ...item, status: 'paused' as const, nextAt: null } : item);
-    automationsRef.current = next;
-    setAutomations(next);
+    automationsRef.current.forEach((item, index) => {
+      if (item.status === 'running') void automationAction(index, 'pause');
+    });
   }
 
   function clearWalletSession(index: number) {
-    stopAutomation(index);
+    // Clears the key from this browser only. A server automation already
+    // started for this vault keeps running with its own encrypted copy — stop
+    // it explicitly to end it.
     sessionGenerationRef.current[index] = (sessionGenerationRef.current[index] ?? 0) + 1;
     signersRef.current[index] = null;
+    delete signerSecretsRef.current[index];
     patchWalletSession(index, { source: null, address: '', manualAddress: '', balanceBaseUnits: '0', nativeGasBaseUnits: '0', error: '', connecting: false, unlocking: false, hasSigner: false });
     setHistory((current) => current.filter((entry) => entry.vaultIndex !== index));
     setSendingVaults((current) => current.filter((item) => item !== index));
@@ -1552,7 +1918,7 @@ export default function Home() {
   function getAmountRange(index: number) {
     const currentVault = vaultsRef.current[index] ?? vaults[index];
     if (!currentVault) throw new Error('Selected vault is unavailable.');
-    const vaultEvm = getVaultEvmConfig(currentVault, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
+    const vaultEvm = getVaultEvmConfig(currentVault, evmMainnetConfigRef.current, bnbMainnetConfigRef.current);
     const activeAsset = getActiveVaultAsset(currentVault, vaultEvm, walletDiscoveredAssetsRef.current);
     const decimals = activeAsset?.decimals ?? (currentVault.tokenDecimals ?? (isEvmChain(currentVault.chainType) ? 18 : transferTokenRef.current.decimals));
     const settings = automationsRef.current[index] ?? automations[index];
@@ -1569,7 +1935,7 @@ export default function Home() {
     const target = vaultsRef.current[index] ?? vaults[index];
     const session = walletSessionsRef.current[index] ?? walletSessions[index];
     if (!target) return false;
-    const vaultEvm = getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
+    const vaultEvm = getVaultEvmConfig(target, evmMainnetConfigRef.current, bnbMainnetConfigRef.current);
     const activeAsset = getActiveVaultAsset(target, vaultEvm, walletDiscoveredAssetsRef.current);
     const decimals = activeAsset.decimals;
     const settings = automationsRef.current[index] ?? automations[index];
@@ -1608,7 +1974,19 @@ export default function Home() {
     });
   }
 
-  function buildIbcTransferMessage(sender: string, receiver: string, amount: bigint): EncodeObject {
+  /**
+   * The bank denom to move for a ZIGChain vault. This is the SELECTED asset's
+   * denom (e.g. the Noble USDC ibc/ hash), never the chain's gas denom — those
+   * differ, and sending uzig for a USDC selection would move the wrong asset.
+   */
+  function cosmosTransferDenom(targetVault?: Vault | null): string {
+    const asset = targetVault ? getActiveVaultAsset(targetVault, defaultEvmMainnetConfig, walletDiscoveredAssetsRef.current) : null;
+    const denom = asset?.denom;
+    if (!denom) throw new Error(`No bank denom is configured for ${asset?.symbol ?? 'the selected asset'} on ZIGChain.`);
+    return denom;
+  }
+
+  function buildIbcTransferMessage(sender: string, receiver: string, amount: bigint, denom: string): EncodeObject {
     const settings = ibcTransferRef.current;
     if (!settings.sourcePort || !settings.sourceChannel) throw new Error('IBC source port and channel must be configured.');
     return {
@@ -1616,7 +1994,7 @@ export default function Home() {
       value: {
         sourcePort: settings.sourcePort,
         sourceChannel: settings.sourceChannel,
-        token: { denom: transferTokenRef.current.denom, amount: amount.toString() },
+        token: { denom, amount: amount.toString() },
         sender,
         receiver,
         timeoutHeight: { revisionNumber: BIGINT_ZERO, revisionHeight: BIGINT_ZERO },
@@ -1645,7 +2023,7 @@ export default function Home() {
       if (isEvmChain(target.chainType)) {
         if (universalSigner.type !== 'evm') throw new Error('Signer is not an EVM wallet.');
 
-        const vaultEvm = getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current);
+        const vaultEvm = getVaultEvmConfig(target, evmMainnetConfigRef.current, bnbMainnetConfigRef.current);
         const activeAsset = getActiveVaultAsset(target, vaultEvm, walletDiscoveredAssetsRef.current);
         const symbol = activeAsset.symbol;
         const decimals = activeAsset.decimals;
@@ -1671,38 +2049,8 @@ export default function Home() {
         } catch {}
 
         if (activeAsset.isNative || !activeAsset.address) {
-          // Native ETH / BNB transfer or contract deposit
-          if (gasBalanceWei !== null) {
-            if (gasBalanceWei < amount) {
-              throw new Error(`Insufficient balance: Current balance (${formatBaseUnits(gasBalanceWei, decimals)} ${symbol}) is less than transfer amount (${formatBaseUnits(amount, decimals)} ${symbol}).`);
-            }
-          }
-
-          if (isContract) {
-            try {
-              const vaultContract = new ethers.Contract(target.address, VAULT_DEPOSIT_ABI, universalSigner.wallet);
-              const tx = await vaultContract['deposit(uint256)'](amount, { value: amount });
-              const receipt = await tx.wait(1);
-              if (!receipt || receipt.status === 0) throw new Error(`${target.chainType === 'bnb' ? 'BNB Chain' : 'EVM'} transaction was reverted by the network.`);
-              txHash = tx.hash;
-            } catch {
-              const tx = await universalSigner.wallet.sendTransaction({
-                to: target.address,
-                value: amount,
-              });
-              const receipt = await tx.wait(1);
-              if (!receipt || receipt.status === 0) throw new Error(`${target.chainType === 'bnb' ? 'BNB Chain' : 'EVM'} transaction was reverted by the network.`);
-              txHash = tx.hash;
-            }
-          } else {
-            const tx = await universalSigner.wallet.sendTransaction({
-              to: target.address,
-              value: amount,
-            });
-            const receipt = await tx.wait(1);
-            if (!receipt || receipt.status === 0) throw new Error(`${target.chainType === 'bnb' ? 'BNB Chain' : 'EVM'} transaction was reverted by the network.`);
-            txHash = tx.hash;
-          }
+          // Stablecoins only: refuse rather than silently move native ETH/BNB.
+          throw new Error(`No token contract is configured for ${symbol} on ${target.name}. Native ${gasSymbol} transfers are disabled; select USDT or USDC.`);
         } else {
           // ERC-20 / BEP-20 token deposit (0xb6b55f25) or transfer (USDT, USDC, mUSDC, etc.)
           const tokenContract = new ethers.Contract(activeAsset.address, ERC20_ABI, universalSigner.wallet);
@@ -1781,18 +2129,25 @@ export default function Home() {
         if (!account) throw new Error('Signer account is unavailable.');
         if (generation !== (sessionGenerationRef.current[index] ?? 0)) return false;
 
+        const zigAsset = getActiveVaultAsset(target, defaultEvmMainnetConfig, walletDiscoveredAssetsRef.current);
+        const zigDenom = cosmosTransferDenom(target);
+        const zigSymbol = zigAsset.symbol;
+        const zigDecimals = zigAsset.decimals;
+
         // Pre-flight balance check on Cosmos if known
         const currentBalanceStr = walletSessionsRef.current[index]?.balanceBaseUnits;
         if (currentBalanceStr) {
           const currentBal = BigInt(currentBalanceStr);
           if (currentBal === 0n) {
-            throw new Error(`Insufficient balance: Your wallet (${account.address.slice(0, 8)}…${account.address.slice(-4)}) has 0 ${transferTokenRef.current.symbol}. Please fund your wallet before transferring.`);
+            throw new Error(`Insufficient balance: Your wallet (${account.address.slice(0, 8)}…${account.address.slice(-4)}) has 0 ${zigSymbol}. Please fund your wallet before transferring.`);
           }
           if (currentBal < amount) {
-            throw new Error(`Insufficient balance: Current balance (${formatBaseUnits(currentBal, transferTokenRef.current.decimals)} ${transferTokenRef.current.symbol}) is less than transfer amount (${formatBaseUnits(amount, transferTokenRef.current.decimals)} ${transferTokenRef.current.symbol}).`);
+            throw new Error(`Insufficient balance: Current balance (${formatBaseUnits(currentBal, zigDecimals)} ${zigSymbol}) is less than transfer amount (${formatBaseUnits(amount, zigDecimals)} ${zigSymbol}).`);
           }
         }
 
+        // Gas is always paid in the chain's native denom, independent of the
+        // asset being transferred.
         const client = await SigningStargateClient.connectWithSigner(
           chainConfigRef.current.rpcUrl,
           signer,
@@ -1800,12 +2155,12 @@ export default function Home() {
         );
 
         let txHash = '';
-        // If target is a native ZIGChain address (starts with zig1), use standard Bank Send for 100% testnet reliability
+        // If target is a native ZIGChain address (starts with zig1), use a standard bank send
         if (target.address.startsWith('zig1')) {
           const sendResult = await client.sendTokens(
             account.address,
             target.address,
-            [coin(amount.toString(), transferTokenRef.current.denom)],
+            [coin(amount.toString(), zigDenom)],
             GAS_MULTIPLIER
           );
           if (sendResult.code !== 0) throw new Error(sendResult.rawLog || `Transaction failed with code ${sendResult.code}.`);
@@ -1813,7 +2168,7 @@ export default function Home() {
         } else {
           const ibcResult = await client.signAndBroadcast(
             account.address,
-            [buildIbcTransferMessage(account.address, target.address, amount)],
+            [buildIbcTransferMessage(account.address, target.address, amount, zigDenom)],
             GAS_MULTIPLIER
           );
           if (ibcResult.code !== 0) throw new Error(ibcResult.rawLog || `Transaction failed with code ${ibcResult.code}.`);
@@ -1824,14 +2179,14 @@ export default function Home() {
         setHistory((current) => current.map((item) => item.id === id ? { ...item, status: 'Success', hash: txHash } : item));
         setTransferStatus({
           kind: 'success',
-          message: `${formatBaseUnits(amount, transferTokenRef.current.decimals)} ${transferTokenRef.current.symbol} transferred to ${target.name}.`,
+          message: `${formatBaseUnits(amount, zigDecimals)} ${zigSymbol} transferred to ${target.name}.`,
           hash: txHash,
         });
         try { await loadBalance(index, account.address, generation); } catch {}
         return true;
       }
     } catch (error) {
-      const vaultEvm = target ? getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current) : undefined;
+      const vaultEvm = target ? getVaultEvmConfig(target, evmMainnetConfigRef.current, bnbMainnetConfigRef.current) : undefined;
       const activeAsset = target && vaultEvm ? getActiveVaultAsset(target, vaultEvm, walletDiscoveredAssetsRef.current) : null;
       const symbol = activeAsset?.symbol ?? (target?.tokenSymbol ?? (target?.chainType === 'bnb' ? 'BNB' : target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol));
       const message = formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol);
@@ -1852,83 +2207,83 @@ export default function Home() {
     return nextExecution;
   }
 
-  function scheduleNextCycle(index: number) {
-    clearVaultTimer(index);
-    const target = automationsRef.current[index];
-    if (!target || target.status !== 'running' || target.mode !== 'automation') return;
-    const intervalSec = (target.interval && target.interval >= 1) ? target.interval : 30;
-    const intervalMs = intervalSec * 1000;
-    const nextAt = unixNow() + intervalMs;
-    patchAutomation(index, { nextAt });
-    timersRef.current[index] = setTimeout(() => {
-      timersRef.current[index] = null;
-      void runAutomationCycle(index);
-    }, intervalMs);
-  }
-
-  async function runAutomationCycle(index: number, force = false) {
-    const currentAuto = automationsRef.current[index];
-    if (!currentAuto || (!force && currentAuto.status !== 'running')) return;
-    if (currentAuto.mode !== 'automation') return;
-    try {
-      const { minimum, maximum } = getAmountRange(index);
-      const amount = randomAmount(minimum, maximum);
-      const success = await enqueueTransfer(index, amount, 'Automation');
-      if (!success) {
-        pauseAutomation(index);
-        return;
-      }
-      patchAutomation(index, { lastAt: unixNow() });
-      scheduleNextCycle(index);
-    } catch (error) {
-      pauseAutomation(index);
-      const target = vaultsRef.current[index] ?? vaults[index];
-      const symbol = target?.tokenSymbol ?? (target?.chainType === 'bnb' ? 'BNB' : target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
-      setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
+  /**
+   * The asset a server job would send, checked against the server's allowlist:
+   * standard USDT/USDC only. Returns the request fields that identify it.
+   */
+  function automationAssetFields(target: Vault) {
+    const vaultEvm = getVaultEvmConfig(target, evmMainnetConfigRef.current, bnbMainnetConfigRef.current);
+    const asset = getActiveVaultAsset(target, vaultEvm, walletDiscoveredAssetsRef.current);
+    if (asset.symbol !== 'USDT' && asset.symbol !== 'USDC') {
+      throw new Error(`Automation sends USDT or USDC only; ${asset.symbol} is selected for ${target.name}.`);
     }
+    return {
+      assetSymbol: asset.symbol,
+      ...(asset.address ? { assetAddress: asset.address } : {}),
+      ...(asset.denom ? { assetDenom: asset.denom } : {}),
+    };
   }
 
-  function startAutomation(index: number) {
+  function announceServerJob(workerOnline: boolean, started: string) {
+    setTransferStatus(workerOnline
+      ? { kind: 'success', message: `${started} It runs on the server and keeps going if you close this tab.` }
+      : { kind: 'error', message: `${started} But the automation worker is offline, so nothing will send until it runs (npm run dev:worker).` });
+  }
+
+  async function startAutomation(index: number) {
     try {
       const current = automationsRef.current[index] ?? automations[index];
       if (current?.mode !== 'automation') throw new Error('Select Automation mode first.');
-      getAmountRange(index);
-      if (!signersRef.current[index]) throw new Error('Unlock the private-key session first.');
       const target = vaultsRef.current[index] ?? vaults[index];
       if (!target?.address || target.address === 'Not configured') throw new Error('This vault address is not configured.');
 
-      clearVaultTimer(index);
-      const intervalSec = (current.interval && current.interval >= 1) ? current.interval : 30;
-      const nextAt = unixNow() + (intervalSec * 1000);
-      patchAutomation(index, { status: 'running', nextAt });
-      setTransferStatus(null);
-      void runAutomationCycle(index, true);
+      // A paused server automation still holds its encrypted key: just resume.
+      if (current.status === 'paused' && current.serverId) {
+        if (await automationAction(index, 'resume')) announceServerJob(Boolean(serverState?.workerOnline), `Automation resumed for ${target.name}.`);
+        return;
+      }
+
+      getAmountRange(index);
+      const secret = signerSecretsRef.current[index];
+      if (!secret) throw new Error('Unlock the private-key session first.');
+      const intervalSeconds = (current.interval && current.interval >= 1) ? current.interval : 30;
+
+      const response = await apiRequest('/api/automations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vaultKey: vaultKeyOf(target),
+          vaultName: target.name,
+          chainType: target.chainType,
+          vaultAddress: target.address,
+          ...automationAssetFields(target),
+          minAmount: current.minimum.trim(),
+          maxAmount: current.maximum.trim() || current.minimum.trim(),
+          intervalSeconds,
+          secret,
+        }),
+      });
+      if (!response.ok) throw new Error(await readApiError(response));
+      const data = await response.json() as { automation: ServerAutomation; workerOnline: boolean };
+      patchAutomation(index, { status: 'running', serverId: data.automation.id, nextAt: data.automation.nextRunAt, lastError: null, inFlight: false });
+      announceServerJob(data.workerOnline, `Automation started for ${target.name}.`);
     } catch (error) {
-      const target = vaultsRef.current[index] ?? vaults[index];
-      const symbol = target?.tokenSymbol ?? (target?.chainType === 'bnb' ? 'BNB' : target?.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol);
-      setTransferStatus({ kind: 'error', message: formatBlockchainError(error, target?.chainType ?? 'zigchain', symbol) });
+      setTransferStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Could not start the automation.' });
     }
+  }
+
+  function canStartOrResume(index: number) {
+    const current = automationsRef.current[index] ?? automations[index];
+    if (current?.status === 'running') return false;
+    // Resuming uses the key already stored on the server; starting needs one.
+    return current?.status === 'paused' && current.serverId ? true : canAutomate(index);
   }
 
   function startAll() {
     automationsRef.current.forEach((item, index) => {
-      if (item.mode === 'automation' && canAutomate(index)) startAutomation(index);
+      if (item.mode === 'automation' && canStartOrResume(index)) void startAutomation(index);
     });
   }
-
-  // Automation watchdog: Ensures running schedules never stall at 0:00 or miss cycles
-  useEffect(() => {
-    const curNow = unixNow();
-    automationsRef.current.forEach((auto, idx) => {
-      if (auto.mode === 'automation' && auto.status === 'running') {
-        if (auto.nextAt && curNow >= auto.nextAt && !sendingVaults.includes(idx)) {
-          if (!timersRef.current[idx]) {
-            void runAutomationCycle(idx, true);
-          }
-        }
-      }
-    });
-  }, [now, sendingVaults]);
 
   function sendManualTransfer() {
     setTransferStatus(null);
@@ -1952,6 +2307,7 @@ export default function Home() {
       const text = await res.text();
       const items = parseWalletCsv(text);
       if (items.length === 0) throw new Error('No valid wallet rows found in CSV template');
+      batchRowMapRef.current = null;
       setCsvQueue(items);
     } catch (err: any) {
       setCsvError(err?.message || 'Failed to load default CSV template');
@@ -1971,6 +2327,7 @@ export default function Home() {
         const text = (e.target?.result as string) || '';
         const items = parseWalletCsv(text);
         if (items.length === 0) throw new Error('No valid wallet rows found in uploaded CSV file');
+        batchRowMapRef.current = null;
         setCsvQueue(items);
       } catch (err: any) {
         setCsvError(err?.message || 'Failed to parse uploaded CSV');
@@ -1998,205 +2355,98 @@ export default function Home() {
       return;
     }
 
-    const currentAuto = automationsRef.current[selectedVault];
-    const intervalSec = (currentAuto?.interval && currentAuto.interval >= 1) ? currentAuto.interval : 2;
-    const delayMs = intervalSec * 1000;
-
-    batchCancelRef.current = false;
-    setBatchRunning(true);
-    setTransferStatus(null);
-
-    const vaultEvm = isEvmChain(target.chainType)
-      ? getVaultEvmConfig(target, evmConfigRef.current, evmTestnetConfigRef.current, evmMainnetConfigRef.current, bnbMainnetConfigRef.current, bnbTestnetConfigRef.current)
-      : null;
-    const activeAsset = vaultEvm ? getActiveVaultAsset(target, vaultEvm, walletDiscoveredAssetsRef.current) : null;
-    const decimals = activeAsset?.decimals ?? (target.tokenDecimals ?? (target.chainType === 'bnb' ? 18 : 6));
-    const symbol = activeAsset?.symbol ?? (target.tokenSymbol ?? (target.chainType === 'bnb' ? 'BNB' : target.chainType === 'erc' ? 'ETH' : transferTokenRef.current.symbol));
-
-    for (let i = 0; i < csvQueue.length; i++) {
-      if (batchCancelRef.current) break;
-
-      const item = csvQueue[i];
-      if (item.status === 'Success') continue;
-
-      setBatchActiveIndex(i);
-      setCsvQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'Depositing', error: undefined } : q));
-
-      const startedAt = unixNow();
-      const historyId = `${startedAt}-batch-${i}-${crypto.randomUUID()}`;
-
-      try {
-        let amountBaseUnits: bigint;
-        try {
-          amountBaseUnits = parseTokenAmount(item.amount.trim(), decimals);
-        } catch {
-          const parsedFloat = parseFloat(item.amount.trim());
-          if (Number.isNaN(parsedFloat) || parsedFloat <= 0) throw new Error(`Invalid amount '${item.amount}'`);
-          amountBaseUnits = BigInt(Math.floor(parsedFloat * 10 ** decimals));
-        }
-
-        const historyEntry: HistoryEntry = {
-          id: historyId,
-          vaultIndex: selectedVault,
-          time: startedAt,
-          amountBaseUnits,
-          status: 'Pending',
-          source: 'Automation',
-        };
-        setHistory((curr) => [historyEntry, ...curr].slice(0, 100));
-
-        let txHash = '';
-
-        if (isEvmChain(target.chainType)) {
-          if (!vaultEvm) throw new Error('EVM configuration missing');
-          const provider = new ethers.JsonRpcProvider(vaultEvm.rpcUrl);
-
-          let cleanKey = item.privateKey.trim();
-          if (!cleanKey.startsWith('0x') && cleanKey.length === 64) {
-            cleanKey = `0x${cleanKey}`;
-          }
-          const wallet = new ethers.Wallet(cleanKey, provider);
-
-          // Pre-flight gas check
-          const gasBal = await provider.getBalance(wallet.address);
-          const gasSymbol = target.chainType === 'bnb' ? (vaultEvm.chainId === 97 ? 'tBNB' : 'BNB') : 'ETH';
-          if (gasBal === 0n) {
-            throw new Error(`Insufficient gas: ${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)} has 0 ${gasSymbol}`);
-          }
-
-          const code = await provider.getCode(target.address);
-          const isContract = Boolean(code && code !== '0x' && code !== '0x0');
-
-          if (activeAsset?.isNative || !activeAsset?.address) {
-            // Native ETH / BNB transfer or contract deposit
-            if (gasBal < amountBaseUnits) {
-              throw new Error(`Insufficient balance: Gas balance < ${item.amount} ${symbol}`);
-            }
-            if (isContract) {
-              try {
-                const vaultContract = new ethers.Contract(target.address, VAULT_DEPOSIT_ABI, wallet);
-                const tx = await vaultContract['deposit(uint256)'](amountBaseUnits, { value: amountBaseUnits });
-                const receipt = await tx.wait(1);
-                if (!receipt || receipt.status === 0) throw new Error('Contract deposit reverted');
-                txHash = tx.hash;
-              } catch {
-                const tx = await wallet.sendTransaction({ to: target.address, value: amountBaseUnits });
-                const receipt = await tx.wait(1);
-                if (!receipt || receipt.status === 0) throw new Error('Native transfer reverted');
-                txHash = tx.hash;
-              }
-            } else {
-              const tx = await wallet.sendTransaction({ to: target.address, value: amountBaseUnits });
-              const receipt = await tx.wait(1);
-              if (!receipt || receipt.status === 0) throw new Error('Native transfer reverted');
-              txHash = tx.hash;
-            }
-          } else {
-            // ERC-20 / BEP-20 token deposit (0xb6b55f25) or transfer (USDT, USDC, etc.)
-            const tokenContract = new ethers.Contract(activeAsset.address, ERC20_ABI, wallet);
-            const tokenBal: bigint = await tokenContract.balanceOf(wallet.address);
-            if (tokenBal < amountBaseUnits) {
-              throw new Error(`Insufficient ${symbol}: balance (${formatBaseUnits(tokenBal, decimals)}) < ${item.amount}`);
-            }
-
-            if (isContract) {
-              // Pre-flight check allowance
-              const allowance: bigint = await tokenContract.allowance(wallet.address, target.address);
-              if (allowance < amountBaseUnits) {
-                setCsvQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'Approving' } : q));
-                const approveTx = await tokenContract.approve(target.address, ethers.MaxUint256);
-                const approveReceipt = await approveTx.wait(1);
-                if (!approveReceipt || approveReceipt.status === 0) {
-                  throw new Error(`Token approval for ${symbol} failed`);
-                }
-              }
-
-              setCsvQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'Depositing' } : q));
-              const vaultContract = new ethers.Contract(target.address, VAULT_DEPOSIT_ABI, wallet);
-              let depositSent = false;
-              try {
-                const tx = await vaultContract['deposit(uint256)'](amountBaseUnits);
-                const receipt = await tx.wait(1);
-                if (!receipt || receipt.status === 0) throw new Error(`Vault deposit(uint256) was reverted`);
-                txHash = tx.hash;
-                depositSent = true;
-              } catch (depErr: any) {
-                console.warn('deposit(uint256) reverted in batch, falling back to token transfer:', depErr);
-              }
-
-              if (!depositSent) {
-                const tx = await tokenContract.transfer(target.address, amountBaseUnits);
-                const receipt = await tx.wait(1);
-                if (!receipt || receipt.status === 0) throw new Error(`${symbol} transfer was reverted`);
-                txHash = tx.hash;
-              }
-            } else {
-              const tx = await tokenContract.transfer(target.address, amountBaseUnits);
-              const receipt = await tx.wait(1);
-              if (!receipt || receipt.status === 0) throw new Error(`${symbol} transfer was reverted`);
-              txHash = tx.hash;
-            }
-          }
-        } else {
-          // Cosmos / ZIGChain batch deposit
-          let cleanKey = item.privateKey.trim();
-          if (cleanKey.startsWith('0x')) cleanKey = cleanKey.slice(2);
-          const cosmosWallet = await DirectSecp256k1Wallet.fromKey(Buffer.from(cleanKey, 'hex'), 'zig');
-          const [account] = await cosmosWallet.getAccounts();
-          const client = await SigningStargateClient.connectWithSigner(
-            chainConfigRef.current.rpcUrl,
-            cosmosWallet,
-            { gasPrice: GasPrice.fromString(`0.025${nativeTokenRef.current.denom}`) }
-          );
-
-          if (target.address.startsWith('zig1')) {
-            const sendResult = await client.sendTokens(
-              account.address,
-              target.address,
-              [coin(amountBaseUnits.toString(), transferTokenRef.current.denom)],
-              GAS_MULTIPLIER
-            );
-            if (sendResult.code !== 0) throw new Error(sendResult.rawLog || `Code ${sendResult.code}`);
-            txHash = sendResult.transactionHash;
-          } else {
-            const ibcResult = await client.signAndBroadcast(
-              account.address,
-              [buildIbcTransferMessage(account.address, target.address, amountBaseUnits)],
-              GAS_MULTIPLIER
-            );
-            if (ibcResult.code !== 0) throw new Error(ibcResult.rawLog || `Code ${ibcResult.code}`);
-            txHash = ibcResult.transactionHash;
-          }
-        }
-
-        setCsvQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'Success', txHash } : q));
-        setHistory((curr) => curr.map((h) => h.id === historyId ? { ...h, status: 'Success', hash: txHash } : h));
-      } catch (rowErr: any) {
-        const errorMsg = formatBlockchainError(rowErr, target.chainType, symbol);
-        setCsvQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'Failed', error: errorMsg } : q));
-        setHistory((curr) => curr.map((h) => h.id === historyId ? { ...h, status: 'Failed', error: errorMsg } : h));
-      }
-
-      // Interval pacing between wallet executions
-      if (i < csvQueue.length - 1 && !batchCancelRef.current) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      }
+    // Submit every row that can be sent. Skipped: rows already successful (a
+    // re-run retries only the rest), rows whose CSV line was unreadable, and
+    // rows shown from a server batch after a reload (their keys are not kept
+    // in the browser). Any other problem fails only that row, on the server.
+    const fromServer = (item: CsvWalletQueueItem) => item.id.startsWith('server-');
+    const queueIndexes = csvQueue.flatMap((item, index) => (
+      item.status === 'Success' || item.parseError || fromServer(item) ? [] : [index]
+    ));
+    if (queueIndexes.length === 0) {
+      const message = csvQueue.every((item) => item.status === 'Success')
+        ? 'Every row in this CSV has already succeeded.'
+        : csvQueue.some(fromServer)
+        ? 'Keys are not kept after a page reload. Upload the CSV file again to re-run it.'
+        : 'No row in this CSV can be sent. See the reason on each row.';
+      setTransferStatus({ kind: 'error', message });
+      return;
     }
 
-    setBatchRunning(false);
-    setBatchActiveIndex(null);
+    const currentAuto = automationsRef.current[selectedVault];
+    const delaySeconds = (currentAuto?.interval && currentAuto.interval >= 1) ? currentAuto.interval : 2;
+    setTransferStatus(null);
+
+    try {
+      const response = await apiRequest('/api/automation-batches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vaultKey: vaultKeyOf(target),
+          vaultName: target.name,
+          chainType: target.chainType,
+          vaultAddress: target.address,
+          ...automationAssetFields(target),
+          delaySeconds,
+          rows: queueIndexes.map((index) => {
+            const item = csvQueue[index]!;
+            return { walletAddress: item.address, secret: item.privateKey, amount: item.amount };
+          }),
+        }),
+      });
+
+      // Only whole-request problems (session, vault, a batch already running)
+      // fail here; individual bad rows come back as Failed rows below.
+      if (!response.ok) throw new Error(await readApiError(response));
+
+      const data = await response.json() as { batch: ServerBatch; queued: number; skipped: number; workerOnline: boolean };
+      batchRowMapRef.current = { batchId: data.batch.id, vaultKey: data.batch.vaultKey, queueIndexes };
+      setCsvQueue((queue) => queue.map((item, index) => {
+        const row = data.batch.rows[queueIndexes.indexOf(index)];
+        if (!row) return item;
+        const { txHash: _txHash, error: _error, ...rest } = item;
+        return { ...rest, status: BATCH_ROW_STATUS[row.status], ...(row.error ? { error: row.error } : {}) };
+      }));
+      const running = data.batch.status === 'running';
+      setBatchRunning(running);
+      const firstPending = data.batch.rows.findIndex((row) => row.status === 'pending');
+      setBatchActiveIndex(firstPending >= 0 ? queueIndexes[firstPending] ?? null : null);
+
+      const skippedHere = csvQueue.filter((item) => item.parseError).length;
+      const skipped = data.skipped + skippedHere;
+      const total = data.queued + skipped;
+      if (data.queued === 0) {
+        setTransferStatus({ kind: 'error', message: `None of the ${total} rows can be sent, so nothing will be sent. See the reason on each row.` });
+        return;
+      }
+      const skippedNote = skipped ? ` ${skipped} row${skipped === 1 ? ' was' : 's were'} skipped — see the reason on each row.` : '';
+      announceServerJob(data.workerOnline, `${data.queued} of ${total} wallet${total === 1 ? '' : 's'} queued for ${target.name}.${skippedNote}`);
+    } catch (error) {
+      setTransferStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Could not start the batch.' });
+    }
   }
 
-  function stopBatchAutomation() {
-    batchCancelRef.current = true;
-    setBatchRunning(false);
-    setBatchActiveIndex(null);
+  async function stopBatchAutomation() {
+    const mapping = batchRowMapRef.current;
+    if (!mapping) return;
+    try {
+      const response = await apiRequest(`/api/automation-batches/${encodeURIComponent(mapping.batchId)}/cancel`, { method: 'POST' });
+      if (!response.ok && response.status !== 409) throw new Error(await readApiError(response));
+      // A row already broadcasting finishes; remaining rows are cancelled and
+      // every stored key for the batch is wiped. The next poll shows the result.
+      setBatchRunning(false);
+      setBatchActiveIndex(null);
+    } catch (error) {
+      setTransferStatus({ kind: 'error', message: error instanceof Error ? error.message : 'Could not stop the batch.' });
+    }
   }
 
   function updateSelectedAutomation(patch: Partial<Automation>) { patchAutomation(selectedVault, patch); }
 
-  function selectDeliveryMode(mode: DeliveryMode) {
-    if (automation.status !== 'stopped') stopAutomation(selectedVault);
+  async function selectDeliveryMode(mode: DeliveryMode) {
+    // Leaving Automation mode stops the server schedule (and wipes its key)
+    // first, so the next state poll cannot switch the panel back.
+    if (automation.status !== 'stopped' && !(await stopAutomation(selectedVault))) return;
     patchAutomation(selectedVault, { mode, status: 'stopped', nextAt: null });
     setTransferStatus(null);
   }
@@ -2238,11 +2488,14 @@ export default function Home() {
 
     setSavingVault(true);
     try {
-      const symbol = newVaultSymbol.trim() || detectedAddVaultAsset?.symbol || inspectedTokenInfo?.symbol || (newVaultChain === 'bnb' ? 'BNB' : newVaultChain === 'erc' ? 'ETH' : 'ZIG');
-      const decimals = newVaultDecimals.trim() ? Number(newVaultDecimals) : (detectedAddVaultAsset?.decimals ?? inspectedTokenInfo?.decimals ?? (isEvmChain(newVaultChain) ? 18 : 6));
+      // With nothing detected, default to the stablecoin the vault will actually
+      // send (USDT on EVM, USDC on ZIGChain) — never the native gas token.
+      const defaultAsset = newVaultChain === 'bnb' ? BSC_MAINNET_USDT : newVaultChain === 'erc' ? MAINNET_USDT : ZIGCHAIN_USDC;
+      const symbol = newVaultSymbol.trim() || detectedAddVaultAsset?.symbol || inspectedTokenInfo?.symbol || defaultAsset.symbol;
+      const decimals = newVaultDecimals.trim() ? Number(newVaultDecimals) : (detectedAddVaultAsset?.decimals ?? inspectedTokenInfo?.decimals ?? defaultAsset.decimals);
       const summary = newVaultSummary.trim() || `${newVaultChain === 'bnb' ? 'BNB Chain' : newVaultChain === 'erc' ? 'ERC / EVM' : 'ZIGChain'} custom automated vault strategy`;
       const tokenAddressToSave = (isEvmChain(newVaultChain)
-        ? (newVaultTokenAddress.trim() || inspectedTokenInfo?.address || detectedAddVaultAsset?.address || (newVaultChain === 'erc' && symbol.toLowerCase() === 'musdc' ? SEPOLIA_MUSDC.address : undefined))
+        ? (newVaultTokenAddress.trim() || inspectedTokenInfo?.address || detectedAddVaultAsset?.address)
         : undefined);
 
       let createdId = `custom-${unixNow()}`;
@@ -2255,7 +2508,7 @@ export default function Home() {
             name,
             address,
             chainType: newVaultChain,
-            evmNetwork: isEvmChain(newVaultChain) ? newVaultEvmNetwork : undefined,
+            evmNetwork: isEvmChain(newVaultChain) ? 'mainnet' : undefined,
             tokenSymbol: symbol,
             tokenDecimals: decimals,
             tokenAddress: tokenAddressToSave,
@@ -2272,14 +2525,14 @@ export default function Home() {
       const bnbCount = vaults.filter((v) => v.chainType === 'bnb').length + 1;
       const ercCount = vaults.filter((v) => v.chainType === 'erc').length + 1;
       const newPair = newVaultChain === 'bnb' ? `BNB ${bnbCount}` : newVaultChain === 'erc' ? `ERC ${ercCount}` : `PAIR ${newIndex + 1}`;
-      const newAccent = newVaultChain === 'bnb' ? 'yellow' : newVaultChain === 'erc' ? (newVaultEvmNetwork === 'mainnet' ? 'green' : 'cyan') : 'blue';
+      const newAccent = newVaultChain === 'bnb' ? 'yellow' : newVaultChain === 'erc' ? 'green' : 'blue';
       const newVault: Vault = {
         id: createdId,
         pair: newPair,
         name,
         address,
         chainType: newVaultChain,
-        evmNetwork: isEvmChain(newVaultChain) ? newVaultEvmNetwork : undefined,
+        evmNetwork: isEvmChain(newVaultChain) ? 'mainnet' : undefined,
         accent: newAccent,
         tvl: '$0',
         apy: '—',
@@ -2329,7 +2582,6 @@ export default function Home() {
       setNewVaultTokenAddress('');
       setInspectingToken(false);
       setInspectedTokenInfo(null);
-      setNewVaultEvmNetwork('testnet');
       setDetectedAddVaultAsset(null);
     } catch (err) {
       setAddVaultError(err instanceof Error ? err.message : 'Failed to create vault.');
@@ -2360,14 +2612,23 @@ export default function Home() {
     setDeleteError('');
 
     try {
-      // 1. Clear active automation timer for this vault
-      if (timersRef.current[targetIndex]) {
-        clearTimeout(timersRef.current[targetIndex]!);
-        timersRef.current[targetIndex] = null;
+      // 1. Stop this vault's server automation (wiping its stored key) and
+      //    cancel any running server batch, so nothing keeps sending for a
+      //    vault that no longer exists in the console.
+      if (automationsRef.current[targetIndex]?.serverId && !(await automationAction(targetIndex, 'stop'))) {
+        throw new Error('Could not stop this vault\'s automation. Stop it first, then delete the vault.');
       }
+      const targetKey = vaultKeyOf(targetVault);
+      for (const batch of serverState?.batches ?? []) {
+        if (batch.vaultKey !== targetKey || batch.status !== 'running') continue;
+        const response = await apiRequest(`/api/automation-batches/${encodeURIComponent(batch.id)}/cancel`, { method: 'POST' });
+        if (!response.ok && response.status !== 409) throw new Error(`Could not cancel this vault's running batch: ${await readApiError(response)}`);
+      }
+      if (batchRowMapRef.current?.vaultKey === targetKey) batchRowMapRef.current = null;
 
       // 2. Clear signer from memory
       signersRef.current[targetIndex] = null;
+      delete signerSecretsRef.current[targetIndex];
 
       // 3. Delete from backend if it is a custom vault
       if (
@@ -2396,13 +2657,13 @@ export default function Home() {
       } catch {}
 
       // 5. Shift refs
-      const nextTimers: Record<number, ReturnType<typeof setTimeout> | null> = {};
       const nextSigners: Record<number, UniversalSigner | null> = {};
+      const nextSecrets: Record<number, string> = {};
       const nextGens: Record<number, number> = {};
-      Object.keys(timersRef.current).forEach((k) => {
+      Object.entries(signerSecretsRef.current).forEach(([k, secret]) => {
         const keyNum = Number(k);
-        if (keyNum < targetIndex) nextTimers[keyNum] = timersRef.current[keyNum];
-        else if (keyNum > targetIndex) nextTimers[keyNum - 1] = timersRef.current[keyNum];
+        if (keyNum < targetIndex) nextSecrets[keyNum] = secret;
+        else if (keyNum > targetIndex) nextSecrets[keyNum - 1] = secret;
       });
       Object.keys(signersRef.current).forEach((k) => {
         const keyNum = Number(k);
@@ -2414,7 +2675,7 @@ export default function Home() {
         if (keyNum < targetIndex) nextGens[keyNum] = sessionGenerationRef.current[keyNum];
         else if (keyNum > targetIndex) nextGens[keyNum - 1] = sessionGenerationRef.current[keyNum];
       });
-      timersRef.current = nextTimers;
+      signerSecretsRef.current = nextSecrets;
       signersRef.current = nextSigners;
       sessionGenerationRef.current = nextGens;
 
@@ -2470,7 +2731,8 @@ export default function Home() {
 
   const statusLabel = automation.status.toUpperCase();
   const automatedVaultIndexes = automations.map((item, index) => item.mode === 'automation' ? index : -1).filter((index) => index >= 0);
-  const allReady = automatedVaultIndexes.length > 0 && automatedVaultIndexes.every((index) => canAutomate(index));
+  // START ALL starts or resumes every automation-mode vault that is able to.
+  const allReady = automatedVaultIndexes.some((index) => canStartOrResume(index));
 
   const actionHint = signerMode === 'csv'
     ? (!vault.address || vault.address === 'Not configured'
@@ -2589,9 +2851,9 @@ export default function Home() {
                   <div className="sidebar-vault-top">
                     <span className={`chain-pill ${item.chainType}`}>
                       {item.chainType === 'bnb'
-                        ? (item.evmNetwork === 'mainnet' ? 'BSC MAINNET' : 'BSC TESTNET')
+                        ? 'BSC MAINNET'
                         : item.chainType === 'erc'
-                        ? (item.evmNetwork === 'mainnet' ? 'MAINNET' : 'SEPOLIA')
+                        ? 'MAINNET'
                         : 'ZIGCHAIN'}
                     </span>
                     <span className="sidebar-vault-pair">{item.pair}</span>
@@ -2672,9 +2934,9 @@ export default function Home() {
         >
           <span className={`chain-pill ${vault.chainType}`}>
             {vault.chainType === 'bnb'
-              ? (currentVaultEvmConfig.chainId === 56 ? 'BSC MAINNET' : 'BSC TESTNET')
+              ? 'BSC MAINNET'
               : vault.chainType === 'erc'
-              ? (currentVaultEvmConfig.chainId === 1 ? 'MAINNET' : 'SEPOLIA')
+              ? 'MAINNET'
               : 'ZIG'}
           </span>
           <span className="active-vault-name">{vault.name}</span>
@@ -2743,49 +3005,13 @@ export default function Home() {
                 </div>
               </div>
 
-              {newVaultChain === 'erc' && (
+              {isEvmChain(newVaultChain) && (
                 <div className="chain-selector-box" style={{ marginTop: '14px' }}>
-                  <span className="form-label">CHOOSE EVM NETWORK</span>
+                  <span className="form-label">NETWORK</span>
                   <div className="chain-toggle-group">
-                    <button
-                      type="button"
-                      className={`chain-select-btn ${newVaultEvmNetwork === 'testnet' ? 'active' : ''}`}
-                      onClick={() => setNewVaultEvmNetwork('testnet')}
-                    >
-                      <strong>Sepolia Testnet</strong>
-                      <small>Alchemy Sepolia RPC · Chain ID 11155111</small>
-                    </button>
-                    <button
-                      type="button"
-                      className={`chain-select-btn ${newVaultEvmNetwork === 'mainnet' ? 'active' : ''}`}
-                      onClick={() => setNewVaultEvmNetwork('mainnet')}
-                    >
-                      <strong>Ethereum Mainnet</strong>
-                      <small>Alchemy Mainnet RPC · Chain ID 1</small>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {newVaultChain === 'bnb' && (
-                <div className="chain-selector-box" style={{ marginTop: '14px' }}>
-                  <span className="form-label">CHOOSE BNB SMART CHAIN NETWORK</span>
-                  <div className="chain-toggle-group">
-                    <button
-                      type="button"
-                      className={`chain-select-btn ${newVaultEvmNetwork === 'mainnet' ? 'active' : ''}`}
-                      onClick={() => setNewVaultEvmNetwork('mainnet')}
-                    >
-                      <strong>BNB Smart Chain Mainnet</strong>
-                      <small>BSC RPC · Chain ID 56</small>
-                    </button>
-                    <button
-                      type="button"
-                      className={`chain-select-btn ${newVaultEvmNetwork === 'testnet' ? 'active' : ''}`}
-                      onClick={() => setNewVaultEvmNetwork('testnet')}
-                    >
-                      <strong>BNB Chain Testnet</strong>
-                      <small>BSC Testnet RPC · Chain ID 97</small>
+                    <button type="button" className="chain-select-btn active" disabled>
+                      <strong>{newVaultChain === 'bnb' ? 'BNB Smart Chain Mainnet' : 'Ethereum Mainnet'}</strong>
+                      <small>{newVaultChain === 'bnb' ? 'Chain ID 56 · multi-RPC failover' : 'Chain ID 1 · multi-RPC failover'}</small>
                     </button>
                   </div>
                 </div>
@@ -3029,7 +3255,12 @@ export default function Home() {
             <h1><span>{currentTokenSymbol}</span><b>→</b>{vault.name}</h1>
           </div>
           <div className="hero-status">
-            <span className="state-pill"><i /> TIMER READY</span>
+            <span
+              className={`state-pill ${serverState?.workerOnline ? 'running' : 'paused'}`}
+              title={serverState?.workerOnline ? 'The automation worker is running; schedules continue with this tab closed.' : 'Start the worker (npm run dev:worker). Scheduled sends are on hold until it runs.'}
+            >
+              <i /> {serverState ? (serverState.workerOnline ? 'WORKER ONLINE' : 'WORKER OFFLINE') : 'WORKER …'}
+            </span>
             <span className={`state-pill ${automation.status}`}>{statusLabel}</span>
             <button className="hero-add-vault-btn" type="button" onClick={() => setAddVaultOpen(true)}>+ ADD VAULT</button>
             <button
@@ -3050,7 +3281,15 @@ export default function Home() {
             <span className="global-icon">◎</span>
             <span>
               <strong>Global automation</strong>
-              <small>{allReady ? `${automatedVaultIndexes.length} automation schedule${automatedVaultIndexes.length === 1 ? '' : 's'} ready` : 'Choose Automation on at least one vault and complete its settings'}</small>
+              <small>
+                {serverState && !serverState.workerOnline && anyRunning
+                  ? 'Worker offline — running schedules are on hold until it starts (npm run dev:worker)'
+                  : anyRunning
+                  ? 'Schedules run on the server and continue with this tab closed'
+                  : allReady
+                  ? `${automatedVaultIndexes.length} automation schedule${automatedVaultIndexes.length === 1 ? '' : 's'} ready`
+                  : 'Choose Automation on at least one vault and complete its settings'}
+              </small>
             </span>
           </div>
           <div className="global-buttons">
@@ -3059,6 +3298,29 @@ export default function Home() {
             <button className="stop" type="button" onClick={stopAll} disabled={!anyActive}>STOP ALL</button>
           </div>
         </section>
+
+        {vaultStats && vaultStats.vaults.length > 0 && (
+          <section className="global-bar" style={{ flexWrap: 'wrap', gap: 12 }}>
+            {vaultStats.vaults.map((entry) => {
+              const hasValue = entry.tvlBaseUnits != null && entry.assetDecimals != null;
+              const age = entry.updatedAt ? Math.max(0, Math.round((now - entry.updatedAt) / 60_000)) : null;
+              return (
+                <div key={entry.vaultKey} title={entry.error ?? undefined}>
+                  <span className="global-icon">◈</span>
+                  <span>
+                    <strong>
+                      {hasValue ? `${formatBaseUnits(entry.tvlBaseUnits!, entry.assetDecimals!)} ${entry.assetSymbol}` : entry.error ? 'Unavailable' : 'Loading…'}
+                    </strong>
+                    <small>
+                      {entry.vaultName}{entry.isPaused ? ' · Paused' : ''}
+                      {age != null ? ` · updated ${age === 0 ? 'just now' : `${age}m ago`}` : ''}
+                    </small>
+                  </span>
+                </div>
+              );
+            })}
+          </section>
+        )}
 
         <section className="two-column">
           {/* Wallet Card - Single Key or CSV Batch */}
@@ -3204,8 +3466,8 @@ export default function Home() {
                                       <code>{item.txHash.slice(0, 8)}…</code>
                                     </a>
                                   ) : item.error ? (
-                                    <span style={{ color: '#ef4444' }} title={item.error}>
-                                      <code>{item.error.slice(0, 18)}…</code>
+                                    <span style={{ color: '#ef4444', whiteSpace: 'normal', display: 'inline-block', maxWidth: 320 }} title={item.error}>
+                                      {item.error}
                                     </span>
                                   ) : (
                                     <span>—</span>
@@ -3225,7 +3487,7 @@ export default function Home() {
                           <path d="M12 2a10 10 0 0 1 10 10" />
                         </svg>
                         <span>
-                          Executing batch: Wallet {(batchActiveIndex ?? 0) + 1} of {csvQueue.length} · Delay: {automation.interval || 2}s
+                          Running on server: wallet {(batchActiveIndex ?? 0) + 1} of {csvQueue.length} · Delay: {automation.interval || 2}s · safe to close this tab
                         </span>
                       </div>
                     )}
@@ -3267,7 +3529,7 @@ export default function Home() {
                   <span>NETWORK:</span>
                   <strong>
                     {vault.chainType === 'bnb'
-                      ? (currentVaultEvmConfig.chainId === 56 ? 'BNB Smart Chain Mainnet (BSC)' : 'BNB Chain Testnet (BSC)')
+                      ? 'BNB Smart Chain Mainnet (BSC)'
                       : vault.chainType === 'erc'
                       ? 'EVM / ERC-Compatible'
                       : `${chainConfig.name} (${chainConfig.id})`}
@@ -3296,7 +3558,7 @@ export default function Home() {
                 <div className="warning-note">
                   <b>!</b>
                   <p>
-                    <strong>In-memory private key signing only.</strong> Secrets are kept strictly in active browser memory and deleted immediately upon refresh, close, or manual disconnect.
+                    <strong>Where your key goes.</strong> For Send Once it stays in this browser&apos;s memory and is cleared on refresh, close or Clear Session. Starting an automation or CSV batch sends it to the server, which stores it encrypted so sends continue with this tab closed, and wipes it when the automation is stopped or the batch ends.
                   </p>
                 </div>
                 <button className="unlock-button" type="button" onClick={() => void unlockManualSession(selectedVault)} disabled={walletSession.unlocking}>
@@ -3324,9 +3586,9 @@ export default function Home() {
               <div>
                 <small>
                   {vault.chainType === 'bnb'
-                    ? (currentVaultEvmConfig.chainId === 56 ? 'BNB SMART CHAIN (BSC)' : 'BNB TESTNET (BSC)')
+                    ? 'BNB SMART CHAIN (BSC)'
                     : vault.chainType === 'erc'
-                    ? (currentVaultEvmConfig.chainId === 1 ? 'ETHEREUM MAINNET (EVM)' : 'SEPOLIA TESTNET (EVM)')
+                    ? 'ETHEREUM MAINNET (EVM)'
                     : 'ZIGCHAIN STRATEGY'}
                 </small>
                 <strong>{vault.name}</strong>
@@ -3380,9 +3642,9 @@ export default function Home() {
                 <strong>{vault.address && vault.address !== 'Not configured' ? `${vault.chainType === 'bnb' ? 'BNB CHAIN' : vault.chainType === 'erc' ? 'ERC / EVM' : 'COSMOS'} TRANSFER READY` : 'VAULT_NOT_CONFIGURED'}</strong>
                 <small>
                   {vault.chainType === 'bnb'
-                    ? `Transfers execute on ${currentVaultEvmConfig.chainId === 56 ? 'BNB Smart Chain Mainnet' : 'BNB Chain Testnet'} (${currentVaultEvmConfig.rpcUrl}) with direct private key execution.`
+                    ? `Transfers execute on BNB Smart Chain Mainnet (${currentVaultEvmConfig.rpcUrl}) with direct private key execution.`
                     : vault.chainType === 'erc'
-                    ? `Transfers execute on ${currentVaultEvmConfig.chainId === 1 ? 'Ethereum Mainnet' : 'Sepolia Testnet'} (${currentVaultEvmConfig.rpcUrl}) with direct private key execution.`
+                    ? `Transfers execute on Ethereum Mainnet (${currentVaultEvmConfig.rpcUrl}) with direct private key execution.`
                     : `Transfers execute on ${chainConfig.name} with standard Cosmos signing.`}
                 </small>
               </div>
@@ -3543,8 +3805,11 @@ export default function Home() {
                 <strong>
                   {signerMode === 'csv'
                     ? (batchRunning ? `BATCH ACTIVE (${(batchActiveIndex ?? 0) + 1}/${csvQueue.length})` : csvQueue.length ? 'BATCH READY' : 'CSV EMPTY')
-                    : (sendingVaults.includes(selectedVault) ? 'SENDING' : automation.mode === 'once' ? 'READY' : statusLabel)}
+                    : (sendingVaults.includes(selectedVault) || automation.inFlight ? 'SENDING' : automation.mode === 'once' ? 'READY' : statusLabel)}
                 </strong>
+                {signerMode !== 'csv' && automation.mode === 'automation' && automation.status === 'paused' && automation.lastError ? (
+                  <small style={{ color: '#ef4444', display: 'block', maxWidth: 360, whiteSpace: 'normal' }} title={automation.lastError}>{automation.lastError}</small>
+                ) : null}
               </span>
             </div>
             <div>
@@ -3558,8 +3823,10 @@ export default function Home() {
                   ? (batchRunning ? `Delay: ${automation.interval || 2}s` : 'Manual batch trigger')
                   : automation.mode === 'once'
                   ? 'Not scheduled'
-                  : sendingVaults.includes(selectedVault)
+                  : sendingVaults.includes(selectedVault) || automation.inFlight
                   ? 'Executing now…'
+                  : automation.status === 'running' && !serverState?.workerOnline
+                  ? 'Waiting for worker'
                   : automation.status === 'running'
                   ? formatCountdown(automation.nextAt, now)
                   : '—'}
@@ -3571,7 +3838,7 @@ export default function Home() {
                   <button
                     className="danger"
                     type="button"
-                    onClick={stopBatchAutomation}
+                    onClick={() => void stopBatchAutomation()}
                     disabled={!batchRunning}
                   >
                     STOP BATCH
@@ -3582,7 +3849,7 @@ export default function Home() {
                     onClick={() => void startBatchAutomation()}
                     disabled={batchRunning || csvQueue.length === 0 || !vault.address || vault.address === 'Not configured'}
                   >
-                    {batchRunning ? 'EXECUTING BATCH…' : `START BATCH DEPOSIT (${csvQueue.length} WALLETS)`}
+                    {batchRunning ? 'BATCH RUNNING ON SERVER…' : `START BATCH DEPOSIT (${csvQueue.length} WALLETS)`}
                   </button>
                 </>
               ) : automation.mode === 'once' ? (
@@ -3596,17 +3863,17 @@ export default function Home() {
                 </button>
               ) : (
                 <>
-                  <button type="button" onClick={() => pauseAutomation(selectedVault)} disabled={automation.status !== 'running'}>
+                  <button type="button" onClick={() => void pauseAutomation(selectedVault)} disabled={automation.status !== 'running'}>
                     PAUSE
                   </button>
-                  <button className="danger" type="button" onClick={() => stopAutomation(selectedVault)} disabled={automation.status === 'stopped'}>
+                  <button className="danger" type="button" onClick={() => void stopAutomation(selectedVault)} disabled={automation.status === 'stopped'}>
                     STOP
                   </button>
                   <button
                     className="start"
                     type="button"
-                    onClick={() => startAutomation(selectedVault)}
-                    disabled={!canAutomate(selectedVault) || automation.status === 'running'}
+                    onClick={() => void startAutomation(selectedVault)}
+                    disabled={!canStartOrResume(selectedVault)}
                   >
                     {automation.status === 'paused' ? 'RESUME' : 'START AUTOMATION'}
                   </button>

@@ -14,9 +14,13 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/shared/package.json packages/shared/package.json
+# packages/database is unused (Prisma/Postgres, never imported) but its
+# package.json must stay listed here: it's an npm workspace per the root
+# package.json glob, so `npm ci` needs it present to resolve the lockfile.
 COPY packages/database/package.json packages/database/package.json
 COPY packages/blockchain-core/package.json packages/blockchain-core/package.json
 COPY packages/blockchain-cosmos/package.json packages/blockchain-cosmos/package.json
+COPY packages/automation/package.json packages/automation/package.json
 
 RUN npm ci
 
@@ -28,6 +32,11 @@ COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
 COPY apps/web apps/web
 
+# NEXT_PUBLIC_* vars are inlined into the client bundle at build time, so this
+# must be a build ARG (passed via docker-compose's build.args), not a runtime
+# environment variable — setting it only at `docker compose up` is too late.
+ARG NEXT_PUBLIC_SITE_URL
+ENV NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL
 RUN npm run build -w @vaultflow/web
 
 WORKDIR /repo/apps/web

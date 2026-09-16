@@ -7,16 +7,40 @@ import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate, createCustomVault, createSession, createUser, deleteCustomVault, ensureAdmin, listCustomVaults, listUsers, revokeSession, type AuthUser, userForSession } from './auth-store.js';
+import { registerAutomationRoutes } from './automation-routes.js';
 import { config, vaultsConfigured } from './config.js';
+import { VaultStatsService, type VaultStatsTarget } from './vault-stats.js';
 
-const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization', 'req.headers.cookie', '*.privateKey', '*.mnemonic', '*.secret'] } });
+/**
+ * TRUST_PROXY: empty (default, trust nothing), a hop count such as "1", "true",
+ * or a comma-separated list of proxy IPs/CIDRs. With one reverse proxy that
+ * appends X-Forwarded-For in front of the console, use "1": the client address
+ * is then the entry that proxy added, which a client cannot forge. Do not set
+ * it without such a proxy, or clients could spoof their IP past rate limits.
+ */
+function parseTrustProxy(value: string): boolean | string | ((address: string, hop: number) => boolean) {
+  if (!value || value === 'false') return false;
+  if (value === 'true') return true;
+  if (/^\d+$/.test(value)) {
+    const hops = Number(value);
+    return (_address, hop) => hop < hops;
+  }
+  return value;
+}
+
+const app = Fastify({
+  trustProxy: parseTrustProxy(config.TRUST_PROXY),
+  logger: { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization', 'req.headers.cookie', '*.privateKey', '*.mnemonic', '*.secret'] },
+});
 
 await app.register(helmet);
 await app.register(cookie);
+// Only the web console's own origin. The browser reaches this API through the
+// same-origin /api proxy, so no other site needs credentialed cross-origin
+// access; reflecting every Origin with credentials:true allowed any page to
+// read authenticated responses.
 await app.register(cors, {
-  origin: (origin, cb) => {
-    cb(null, true);
-  },
+  origin: [config.APP_ORIGIN],
   credentials: true,
 });
 await app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
@@ -30,13 +54,47 @@ function currentUser(request: FastifyRequest) { return requestUsers.get(request)
 
 app.addHook('preHandler', async (request, reply) => {
   const path = request.url.split('?')[0] ?? request.url;
-  if (!path.startsWith('/api/') || path === '/api/auth/login' || path === '/api/config/public' || path === '/api/csv/template' || path.startsWith('/api/vaults/custom')) return;
+  // Custom vaults (list, create, delete) require a session: the console only
+  // loads them after login, and an unauthenticated caller could otherwise add a
+  // look-alike vault pointing at their own address.
+  if (!path.startsWith('/api/') || path === '/api/auth/login' || path === '/api/config/public' || path === '/api/csv/template') return;
 
   const token = request.cookies[SESSION_COOKIE];
   const user = token ? userForSession(token) : null;
   if (!user) return reply.code(401).send({ code: 'AUTHENTICATION_REQUIRED' });
   requestUsers.set(request, user);
 });
+
+registerAutomationRoutes(app, currentUser);
+
+// Live TVL for the TokenX vault contracts. These are analytics only — a
+// separate contract from the TokenX main/admin deposit-target wallets above,
+// deployed at the same address on both Ethereum and BSC (CREATE2).
+const statsTargets: VaultStatsTarget[] = (['USDC', 'USDT'] as const).flatMap((symbol) => {
+  const contract = symbol === 'USDC' ? config.TOKENX_USDC_VAULT_ADDRESS : config.TOKENX_USDT_VAULT_ADDRESS;
+  if (!contract) return [];
+  return (['erc', 'bnb'] as const).map((chainType) => ({
+    vaultKey: `tokenx:${chainType}:${symbol.toLowerCase()}`,
+    vaultName: `TokenX ${symbol} Vault (${chainType === 'bnb' ? 'BSC' : 'Ethereum'})`,
+    chainType,
+    contract,
+  }));
+});
+const vaultStats = new VaultStatsService({
+  targets: statsTargets,
+  rpcUrls: { erc: config.ethRpcUrls, bnb: config.bscRpcUrls },
+  refreshMinutes: config.VAULT_STATS_REFRESH_MINUTES,
+  log: app.log,
+});
+vaultStats.start();
+app.addHook('onClose', async () => vaultStats.stop());
+
+// Polled by every open console; limited separately so a few open tabs cannot
+// exhaust the global request budget.
+app.get('/api/vault-stats', { config: { rateLimit: { max: 600, timeWindow: '1 minute' } } }, async () => ({
+  refreshMinutes: vaultStats.refreshMinutes,
+  vaults: vaultStats.list(),
+}));
 
 app.get('/', async (_request, reply) => reply.redirect(config.APP_ORIGIN));
 app.get('/health', async () => ({ status: 'ok', service: 'api' }));
@@ -92,11 +150,21 @@ app.post('/api/vaults/custom', async (request, reply) => {
     name: z.string().min(1).max(64),
     address: z.string().min(1).max(128),
     chainType: z.enum(['zigchain', 'erc', 'bnb']),
-    evmNetwork: z.enum(['mainnet', 'testnet']).optional(),
+    evmNetwork: z.literal('mainnet').optional(),
     tokenSymbol: z.string().min(1).max(16).optional(),
     tokenDecimals: z.coerce.number().int().min(0).max(255).optional(),
-    tokenAddress: z.string().optional(),
+    tokenAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(),
     summary: z.string().max(256).optional(),
+  }).superRefine((vault, context) => {
+    // Same rules the console enforces, so a direct API call cannot store an
+    // address no transfer path could ever use.
+    const valid = vault.chainType === 'zigchain'
+      ? /^zig1[0-9a-z]{38,62}$/.test(vault.address)
+      : /^0x[0-9a-fA-F]{40}$/.test(vault.address);
+    if (!valid) context.addIssue({ code: 'custom', path: ['address'], message: `Invalid ${vault.chainType} address.` });
+    if (vault.chainType === 'zigchain' && vault.tokenAddress) {
+      context.addIssue({ code: 'custom', path: ['tokenAddress'], message: 'ZIGChain vaults use bank denoms, not token contracts.' });
+    }
   }).safeParse(request.body);
   if (!input.success) return reply.code(400).send({ code: 'INVALID_VAULT_PAYLOAD' });
   const vault = createCustomVault(input.data);
@@ -113,37 +181,21 @@ app.delete('/api/vaults/custom/:id', async (request, reply) => {
 
 app.get('/api/config/public', async () => ({
   chain: { type: config.CHAIN_TYPE ?? 'cosmos-sdk', name: config.CHAIN_NAME, id: config.CHAIN_ID, rpcUrl: config.RPC_URL, apiUrl: config.API_URL, explorerUrl: config.BLOCK_EXPLORER_URL },
-  evm: {
-    rpcUrl: config.EVM_RPC_URL,
-    chainId: config.EVM_CHAIN_ID,
-    explorerUrl: config.EVM_EXPLORER_URL,
-    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-  },
-  evmTestnet: {
-    rpcUrl: config.EVM_TESTNET_RPC_URL,
-    chainId: config.EVM_TESTNET_CHAIN_ID,
-    explorerUrl: config.EVM_TESTNET_EXPLORER_URL,
-    nativeCurrency: { name: 'Sepolia Ether', symbol: 'ETH', decimals: 18 },
-  },
   evmMainnet: {
-    rpcUrl: config.EVM_MAINNET_RPC_URL,
+    rpcUrl: config.ETH_MAINNET_RPC_URL,
     chainId: config.EVM_MAINNET_CHAIN_ID,
     explorerUrl: config.EVM_MAINNET_EXPLORER_URL,
     nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: config.ethRpcUrls,
+    wsUrls: config.ethWsUrls,
   },
   bnbMainnet: {
     rpcUrl: config.BNB_MAINNET_RPC_URL,
     chainId: config.BNB_MAINNET_CHAIN_ID,
     explorerUrl: config.BNB_MAINNET_EXPLORER_URL,
     nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
-    rpcUrls: config.BSC_RPC_URLS ? config.BSC_RPC_URLS.split(',').map((u) => u.trim()) : [config.BNB_MAINNET_RPC_URL],
-    wsUrls: config.BSC_WS_URLS ? config.BSC_WS_URLS.split(',').map((u) => u.trim()) : [],
-  },
-  bnbTestnet: {
-    rpcUrl: config.BNB_TESTNET_RPC_URL,
-    chainId: config.BNB_TESTNET_CHAIN_ID,
-    explorerUrl: config.BNB_TESTNET_EXPLORER_URL,
-    nativeCurrency: { name: 'tBNB', symbol: 'tBNB', decimals: 18 },
+    rpcUrls: config.bscRpcUrls,
+    wsUrls: config.bscWsUrls,
   },
   nativeToken: { symbol: config.NATIVE_TOKEN_SYMBOL, denom: config.NATIVE_TOKEN_DENOM, decimals: config.NATIVE_TOKEN_DECIMALS },
   token: { symbol: config.TOKEN_SYMBOL, denom: config.TOKEN_DENOM, decimals: config.TOKEN_DECIMALS },
@@ -167,7 +219,10 @@ app.get('/api/config/public', async () => ({
     { id: 'vault-3', name: config.VAULT_3_NAME, address: config.VAULT_3_IBC_RECEIVER || config.VAULT_3_ADDRESS || null, chainType: 'zigchain' },
     { id: 'vault-4', name: config.VAULT_4_NAME, address: config.VAULT_4_ADDRESS, chainType: config.VAULT_4_CHAIN_TYPE, evmNetwork: 'mainnet' },
     { id: 'vault-5', name: config.VAULT_5_NAME, address: config.VAULT_5_ADDRESS, chainType: config.VAULT_5_CHAIN_TYPE, evmNetwork: 'mainnet' },
-    { id: 'vault-6', name: config.VAULT_6_NAME, address: config.VAULT_6_ADDRESS, chainType: config.VAULT_6_CHAIN_TYPE, evmNetwork: 'testnet' },
+    { id: 'vault-6', name: config.VAULT_6_NAME, address: config.VAULT_6_ADDRESS, chainType: config.VAULT_6_CHAIN_TYPE, evmNetwork: 'mainnet' },
+    { id: 'vault-7', name: config.VAULT_7_NAME, address: config.VAULT_7_ADDRESS, chainType: config.VAULT_7_CHAIN_TYPE, evmNetwork: 'mainnet' },
+    { id: 'vault-8', name: config.VAULT_8_NAME, address: config.VAULT_8_ADDRESS, chainType: config.VAULT_8_CHAIN_TYPE, evmNetwork: 'mainnet' },
+    { id: 'vault-9', name: config.VAULT_9_NAME, address: config.VAULT_9_ADDRESS, chainType: config.VAULT_9_CHAIN_TYPE, evmNetwork: 'mainnet' },
   ],
   blockchainStatus: vaultsConfigured ? 'READY' : 'VAULT_ADDRESSES_NOT_CONFIGURED',
   walletModes: ['private-key'],
@@ -177,7 +232,8 @@ app.get('/api/config/public', async () => ({
 app.get('/api/csv/template', async (request, reply) => {
   const query = z.object({ chain: z.enum(['bnb', 'erc', 'ethereum', 'zigchain']).default('bnb') }).safeParse(request.query);
   const chain = query.success ? query.data.chain : 'bnb';
-  const filename = chain === 'zigchain' ? 'wallets_zigchain.csv' : chain === 'erc' || chain === 'ethereum' ? 'wallets_ethereum.csv' : 'wallets_bnb.csv';
+  // Templates only: placeholders, never real keys. Filled-in CSVs are gitignored.
+  const filename = chain === 'zigchain' ? 'wallets_zigchain.template.csv' : chain === 'erc' || chain === 'ethereum' ? 'wallets_ethereum.template.csv' : 'wallets_bnb.template.csv';
 
   const possiblePaths = [
     path.join(process.cwd(), 'data', 'csv', filename),
@@ -193,9 +249,9 @@ app.get('/api/csv/template', async (request, reply) => {
   }
 
   const defaults: Record<string, string> = {
-    bnb: `wallet_address,private_key,amount,scheduled_time\n0x12a72647490701848Aa4Ad7fd1AcE0aDc4B12B50,0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a07471195,5.0,2026-09-07 18:00:00\n0xc5323280c2f4212cFCcF5705561a5E759c569e95,0x689af8fd534509c0f2821e6aaa98d1ee04088cb0e0e0ce442721f295610d0a4f,10.0,2026-09-07 18:01:00\n0x388C818CA8B9251b393131C08a73683246A166dd,0xbb88f8fd534509c0f2821e6aaa98d1ee04088cb0e0e0ce442721f295610d0b50,25.0,2026-09-07 18:02:00\n`,
-    erc: `wallet_address,private_key,amount,scheduled_time\n0xc5323280c2f4212cFCcF5705561a5E759c569e95,0x689af8fd534509c0f2821e6aaa98d1ee04088cb0e0e0ce442721f295610d0a4f,20.0,2026-09-07 18:00:00\n0x12a72647490701848Aa4Ad7fd1AcE0aDc4B12B50,0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a07471195,15.0,2026-09-07 18:01:00\n0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF,0x789af8fd534509c0f2821e6aaa98d1ee04088cb0e0e0ce442721f295610d0c61,30.0,2026-09-07 18:02:00\n`,
-    zigchain: `wallet_address,private_key,amount,scheduled_time\nzig1n3cmvsccl7z3fjcvzpjww3mshfz3tuclxs3ytx,0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a07471195,10.0,2026-09-07 18:00:00\nzig1wx9ajrpwvu69ykw93fd7vdlxzc4rakyvq7202x,0x689af8fd534509c0f2821e6aaa98d1ee04088cb0e0e0ce442721f295610d0a4f,25.0,2026-09-07 18:01:00\n`,
+    bnb: `wallet_address,private_key,amount,scheduled_time\n0xYOUR_WALLET_ADDRESS,YOUR_64_HEX_PRIVATE_KEY,10.0,\n`,
+    erc: `wallet_address,private_key,amount,scheduled_time\n0xYOUR_WALLET_ADDRESS,YOUR_64_HEX_PRIVATE_KEY,10.0,\n`,
+    zigchain: `wallet_address,private_key,amount,scheduled_time\nzig1YOUR_WALLET_ADDRESS,YOUR_64_HEX_PRIVATE_KEY,10.0,\n`,
   };
   const key = chain === 'zigchain' ? 'zigchain' : chain === 'erc' || chain === 'ethereum' ? 'erc' : 'bnb';
   return reply.type('text/csv').send(defaults[key]);

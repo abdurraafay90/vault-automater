@@ -9,5 +9,9 @@ dist/
 *.log
 coverage/
 .data/
+
+# Wallet CSVs contain private keys. Only the placeholder templates are tracked.
+data/csv/*.csv
+!data/csv/*.template.csv
 .DS_Store
 Thumbs.db
