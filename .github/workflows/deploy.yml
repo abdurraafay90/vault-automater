@@ -47,24 +47,36 @@ jobs:
     environment: production
     permissions:
       contents: read
+      packages: read
     steps:
       - name: Check out merged deployment files
         uses: actions/checkout@v4
       - name: Install SSH credentials and verified host keys
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KEY_PASSPHRASE: ${{ secrets.SSH_KEY_PASSPHRASE }}
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
         run: |
           install -m 700 -d "$HOME/.ssh"
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
           printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/deploy_key" "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+          eval "$(ssh-agent -s)"
+          askpass_helper="$RUNNER_TEMP/ssh-askpass"
+          umask 077
+          printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$SSH_KEY_PASSPHRASE"' > "$askpass_helper"
+          chmod 700 "$askpass_helper"
+          trap 'rm -f "$askpass_helper"' EXIT
+          DISPLAY=:0 SSH_ASKPASS="$askpass_helper" SSH_ASKPASS_REQUIRE=force \
+            ssh-add - <<< "$SSH_PRIVATE_KEY"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
       - name: Copy deployment controls
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
-          scp -i "$HOME/.ssh/deploy_key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
             docker-compose.prod.yml .github/workflows/deploy.sh .github/workflows/rollback.sh \
             "$SSH_USER@$SSH_HOST:/opt/vault-automater/"
       - name: Deploy and verify
@@ -75,6 +87,9 @@ jobs:
           IMAGE_TAG: ${{ needs.publish.outputs.image_tag }}
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SQLITE_MIGRATION_APPROVAL: ${{ vars.SQLITE_MIGRATION_APPROVAL }}
+          SQLITE_RECOVERY_PLAN: ${{ vars.SQLITE_RECOVERY_PLAN }}
         run: |
-          printf '%s\n' "$GHCR_TOKEN" | ssh -i "$HOME/.ssh/deploy_key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" \
-            "cd /opt/vault-automater && chmod 700 deploy.sh rollback.sh && IMAGE_PREFIX='$IMAGE_PREFIX' IMAGE_TAG='$IMAGE_TAG' GHCR_USERNAME='$GHCR_USERNAME' ./deploy.sh"
+          printf -v remote_command 'cd /opt/vault-automater && chmod 700 deploy.sh rollback.sh && IMAGE_PREFIX=%q IMAGE_TAG=%q GHCR_USERNAME=%q SQLITE_MIGRATION_APPROVAL=%q SQLITE_RECOVERY_PLAN=%q ./deploy.sh' \
+            "$IMAGE_PREFIX" "$IMAGE_TAG" "$GHCR_USERNAME" "$SQLITE_MIGRATION_APPROVAL" "$SQLITE_RECOVERY_PLAN"
+          printf '%s\n' "$GHCR_TOKEN" | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" "$remote_command"

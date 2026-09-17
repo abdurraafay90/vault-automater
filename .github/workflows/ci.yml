@@ -26,6 +26,13 @@ jobs:
           npm run typecheck
           npm run build
           npm run test
+      - name: Validate merged production Compose configuration
+        env:
+          IMAGE_PREFIX: ghcr.io/example/vault-automater
+          IMAGE_TAG: ci-validation
+        run: |
+          : > .env
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
       - name: Build API image
         run: docker build --file apps/api/Dockerfile --tag vault-automater-api:ci .
       - name: Build Web image
