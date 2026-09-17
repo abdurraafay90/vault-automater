@@ -1,0 +1,12 @@
+services:
+  api:
+    image: ${IMAGE_PREFIX:?IMAGE_PREFIX is required}/api:${IMAGE_TAG:?IMAGE_TAG is required}
+    ports: !override
+      - 127.0.0.1:4000:4000
+  web:
+    image: ${IMAGE_PREFIX:?IMAGE_PREFIX is required}/web:${IMAGE_TAG:?IMAGE_TAG is required}
+    ports: !override
+      - 127.0.0.1:4560:4560
+  worker:
+    image: ${IMAGE_PREFIX:?IMAGE_PREFIX is required}/worker:${IMAGE_TAG:?IMAGE_TAG is required}
+    ports: !override []
