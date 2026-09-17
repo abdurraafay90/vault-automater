@@ -1,0 +1,80 @@
+name: Deploy production
+
+"on":
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.release.outputs.image_tag }}
+      image_prefix: ${{ steps.release.outputs.image_prefix }}
+    steps:
+      - name: Check out merged commit
+        uses: actions/checkout@v4
+      - name: Set release metadata
+        id: release
+        run: |
+          echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_prefix=$(printf 'ghcr.io/%s' '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and publish API
+        run: docker buildx build --file apps/api/Dockerfile --tag ${{ steps.release.outputs.image_prefix }}/api:${{ steps.release.outputs.image_tag }} --push .
+      - name: Build and publish Web
+        run: docker buildx build --file apps/web/Dockerfile --build-arg NEXT_PUBLIC_SITE_URL=https://vault.wickhub.cc --tag ${{ steps.release.outputs.image_prefix }}/web:${{ steps.release.outputs.image_tag }} --push .
+      - name: Build and publish Worker
+        run: docker buildx build --file apps/worker/Dockerfile --tag ${{ steps.release.outputs.image_prefix }}/worker:${{ steps.release.outputs.image_tag }} --push .
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - name: Check out merged deployment files
+        uses: actions/checkout@v4
+      - name: Install SSH credentials and verified host keys
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/deploy_key" "$HOME/.ssh/known_hosts"
+      - name: Copy deployment controls
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          scp -i "$HOME/.ssh/deploy_key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            docker-compose.prod.yml .github/workflows/deploy.sh .github/workflows/rollback.sh \
+            "$SSH_USER@$SSH_HOST:/opt/vault-automater/"
+      - name: Deploy and verify
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          IMAGE_PREFIX: ${{ needs.publish.outputs.image_prefix }}
+          IMAGE_TAG: ${{ needs.publish.outputs.image_tag }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s\n' "$GHCR_TOKEN" | ssh -i "$HOME/.ssh/deploy_key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" \
+            "cd /opt/vault-automater && chmod 700 deploy.sh rollback.sh && IMAGE_PREFIX='$IMAGE_PREFIX' IMAGE_TAG='$IMAGE_TAG' GHCR_USERNAME='$GHCR_USERNAME' ./deploy.sh"
