@@ -3,7 +3,7 @@
 
 ## 1. GitHub Actions Deployment Setup
 
-Before enabling the deployment job, create the GitHub environment named `production` and add these secrets to it:
+Before enabling deployment, add these under GitHub repository Settings > Secrets and variables > Actions > Repository secrets:
 
 | Secret | Purpose |
 |---|---|
@@ -18,8 +18,8 @@ Before enabling the deployment job, create the GitHub environment named `product
 The deployment account must be able to:
 
 - Run Docker Compose for the `vault-automater` project.
-- Read `/opt/vault-automater/.env`.
-- Write to `/opt/vault-automater/.deploy` and `/var/backups/vault-automater`.
+- Read `/root/saad/tokenXvaultautomator/vault-automater/.env`.
+- Write to `/root/saad/tokenXvaultautomator/vault-automater/.deploy` and `/var/backups/vault-automater`.
 
 It should not be granted access to unrelated Docker projects or server users.
 

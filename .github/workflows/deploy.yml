@@ -77,7 +77,7 @@ jobs:
         run: |
           scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
             docker-compose.prod.yml .github/workflows/deploy.sh .github/workflows/rollback.sh \
-            "$SSH_USER@$SSH_HOST:/opt/vault-automater/"
+            "$SSH_USER@$SSH_HOST:/root/saad/tokenXvaultautomator/vault-automater/"
       - name: Deploy and verify
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
@@ -89,6 +89,6 @@ jobs:
           SQLITE_MIGRATION_APPROVAL: ${{ vars.SQLITE_MIGRATION_APPROVAL }}
           SQLITE_RECOVERY_PLAN: ${{ vars.SQLITE_RECOVERY_PLAN }}
         run: |
-          printf -v remote_command 'cd /opt/vault-automater && chmod 700 deploy.sh rollback.sh && IMAGE_PREFIX=%q IMAGE_TAG=%q GHCR_USERNAME=%q SQLITE_MIGRATION_APPROVAL=%q SQLITE_RECOVERY_PLAN=%q ./deploy.sh' \
+          printf -v remote_command 'cd /root/saad/tokenXvaultautomator/vault-automater && chmod 700 deploy.sh rollback.sh && IMAGE_PREFIX=%q IMAGE_TAG=%q GHCR_USERNAME=%q SQLITE_MIGRATION_APPROVAL=%q SQLITE_RECOVERY_PLAN=%q ./deploy.sh' \
             "$IMAGE_PREFIX" "$IMAGE_TAG" "$GHCR_USERNAME" "$SQLITE_MIGRATION_APPROVAL" "$SQLITE_RECOVERY_PLAN"
           printf '%s\n' "$GHCR_TOKEN" | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" "$remote_command"

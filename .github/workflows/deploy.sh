@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT=/opt/vault-automater
+ROOT=/root/saad/tokenXvaultautomator/vault-automater
 PROJECT=vault-automater
 BACKUP_DIR=${BACKUP_DIR:-/var/backups/vault-automater}
 BASE_COMPOSE=(docker compose -p "$PROJECT" -f "$ROOT/docker-compose.yml")
@@ -155,8 +155,16 @@ trap 'status=$?; if (( status != 0 )); then echo "Deployment failed (exit $statu
 # Stop the Worker before the final snapshot so in-flight jobs finish before the
 # backup. API writes remain SQLite-consistent through VACUUM INTO.
 "${COMPOSE[@]}" stop -t 660 worker
-until [[ -z "$(heartbeat_row)" ]]; do sleep 1; done
+deadline=$((SECONDS + 30))
+until [[ -z "$(heartbeat_row)" ]]; do
+  if (( SECONDS >= deadline )); then
+    echo "Worker heartbeat did not clear; aborting deployment" >&2
+    exit 1
+  fi
+  sleep 1
+done
 backup_database
+
 "${COMPOSE[@]}" up -d --no-build --force-recreate --scale worker=1 api web worker
 wait_for_health
 

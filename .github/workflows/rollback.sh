@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT=/opt/vault-automater
+ROOT=/root/saad/tokenXvaultautomator/vault-automater
 PROJECT=vault-automater
 COMPOSE=(docker compose -p "$PROJECT" -f "$ROOT/docker-compose.yml" -f "$ROOT/docker-compose.prod.yml")
 STATE_FILE=${STATE_FILE_OVERRIDE:-$ROOT/.deploy/verified-release.env}
