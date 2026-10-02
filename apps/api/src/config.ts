@@ -44,8 +44,11 @@ const environmentSchema = z.object({
   API_URL: z.url().default('https://zigchain-mainnet-lcd.zigscan.net'),
   BLOCK_EXPLORER_URL: z.url().default('https://zigscan.org'),
   NATIVE_TOKEN_SYMBOL: z.string().min(1).default('ZIG'),
-  NATIVE_TOKEN_DENOM: z.string().min(1).default('uzig'),
-  NATIVE_TOKEN_DECIMALS: z.coerce.number().int().nonnegative().max(255).default(6),
+  // ZigChain's EVM-compatibility migration: uzig (6 dec) -> azig (18 dec),
+  // a hard cutover. TOKEN_DENOM/TOKEN_DECIMALS below are the vault asset
+  // (USDC) and are unrelated.
+  NATIVE_TOKEN_DENOM: z.string().min(1).default('azig'),
+  NATIVE_TOKEN_DECIMALS: z.coerce.number().int().nonnegative().max(255).default(18),
   TOKEN_SYMBOL: z.string().min(1).default('ZIG'),
   TOKEN_DENOM: z.string().min(1).default('uzig'),
   TOKEN_DECIMALS: z.coerce.number().int().nonnegative().max(255).default(6),

@@ -4,8 +4,10 @@
 #   2. Set APP_ORIGIN, NEXT_PUBLIC_SITE_URL and TRUST_PROXY in .env (see
 #      .env.example). NEXT_PUBLIC_SITE_URL is read at build time, so re-run
 #      `docker compose up -d --build` after changing it.
-#   3. `api` is intentionally not published beyond localhost: the browser only
-#      ever reaches it through `web`'s /api proxy over the internal network.
+#   3. `web` and `api` are both bound to 127.0.0.1 only — your reverse proxy
+#      (HAProxy, Caddy, nginx) must forward to 127.0.0.1:4560 for the app to
+#      be reachable at all. The browser reaches `api` only via `web`'s /api
+#      proxy over the internal Docker network, never directly.
 #
 # No Postgres/Redis: everything (auth, custom vaults, automation jobs) lives
 # in SQLite under the vaultflow_api_data volume, shared by api and worker.
@@ -52,7 +54,7 @@ services:
     environment:
       NODE_ENV: production
       BACKEND_API_URL: http://api:4000
-    ports: ["4560:4560"]
+    ports: ["127.0.0.1:4560:4560"]
     depends_on:
       - api
 

@@ -569,7 +569,10 @@ function getVaultEvmConfig(
 }
 
 
-const defaultTokenConfig: TokenConfig = { symbol: 'ZIG', denom: 'uzig', decimals: 6 };
+// ZigChain EVM-compatibility migration: native gas denom uzig (6 dec) -> azig
+// (18 dec), a hard cutover. Only used as a fallback before /api/config/public
+// loads; the live value always comes from the server's NATIVE_TOKEN_* env.
+const defaultTokenConfig: TokenConfig = { symbol: 'ZIG', denom: 'azig', decimals: 18 };
 
 const defaultIbcTransferConfig: IbcTransferConfig = {
   sourcePort: 'transfer',
@@ -1977,7 +1980,7 @@ export default function Home() {
   /**
    * The bank denom to move for a ZIGChain vault. This is the SELECTED asset's
    * denom (e.g. the Noble USDC ibc/ hash), never the chain's gas denom — those
-   * differ, and sending uzig for a USDC selection would move the wrong asset.
+   * differ, and sending azig for a USDC selection would move the wrong asset.
    */
   function cosmosTransferDenom(targetVault?: Vault | null): string {
     const asset = targetVault ? getActiveVaultAsset(targetVault, defaultEvmMainnetConfig, walletDiscoveredAssetsRef.current) : null;

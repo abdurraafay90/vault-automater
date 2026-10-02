@@ -4,16 +4,20 @@ import { GasPrice, SigningStargateClient, StargateClient, type DeliverTxResponse
 const BIGINT_ZERO = BigInt(0);
 const MILLISECONDS_TO_NANOSECONDS = BigInt(1000000);
 
+// Legacy/unused: not imported by any app (the live ZIG send path is
+// packages/automation/src/zig.ts, mainnet-only). Kept in sync anyway —
+// ZigChain's EVM-compatibility migration replaced uzig (6 dec) with azig
+// (18 dec), a hard cutover.
 export const ZIG_TESTNET = {
   chainId: 'zig-test-2',
   chainName: 'ZIGChain Testnet',
   rpcUrl: 'https://testnet-rpc.zigchain.com',
   apiUrl: 'https://testnet-api.zigchain.com',
   addressPrefix: 'zig',
-  denom: 'uzig',
+  denom: 'azig',
   symbol: 'ZIG',
-  decimals: 6,
-  gasPrice: '0.025uzig',
+  decimals: 18,
+  gasPrice: '0.025azig',
 } as const;
 
 type IbcTransferOptions = {

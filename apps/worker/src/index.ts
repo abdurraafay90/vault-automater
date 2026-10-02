@@ -51,7 +51,8 @@ const chain = {
   ethRpcUrls: splitUrlList(process.env.ETH_RPC_URLS, DEFAULT_ETH_RPC_URLS),
   bscRpcUrls: splitUrlList(process.env.BSC_RPC_URLS, DEFAULT_BSC_RPC_URLS),
   zigRpcUrl: process.env.RPC_URL?.trim() ?? '',
-  zigGasDenom: process.env.NATIVE_TOKEN_DENOM?.trim() || 'uzig',
+  // ZigChain EVM-compatibility migration: uzig (6 dec) -> azig (18 dec).
+  zigGasDenom: process.env.NATIVE_TOKEN_DENOM?.trim() || 'azig',
   ibc: {
     sourcePort: process.env.IBC_SOURCE_PORT?.trim() || 'transfer',
     sourceChannel: process.env.IBC_SOURCE_CHANNEL?.trim() || 'channel-3',

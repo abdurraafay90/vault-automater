@@ -67,13 +67,12 @@ docker compose down -v
 
 Example: `vault.wickhub.cc`.
 
-1. **DNS & TLS.** This app serves plain HTTP on port `4560` (web) — it does not
-   terminate TLS itself. Point `vault.wickhub.cc` at the host and put a
-   TLS-terminating reverse proxy in front of the `web` container: a Cloudflare
-   Tunnel, Caddy, or nginx with Let's Encrypt all work. Only `web` needs to be
-   reachable from the internet; `api` is bound to `127.0.0.1:4000` in
-   [docker-compose.yml](docker-compose.yml) and is only ever reached over the
-   internal Docker network via `web`'s `/api/*` proxy.
+1. **DNS & TLS.** This app serves plain HTTP only. Both `api` and `web` are
+   bound to `127.0.0.1` in [docker-compose.yml](docker-compose.yml) — nothing
+   is reachable from the internet until your reverse proxy (HAProxy, etc.)
+   terminates TLS for `vault.wickhub.cc` and forwards to `127.0.0.1:4560`.
+   `api` is never reached directly; the browser only reaches it through
+   `web`'s `/api/*` proxy over the internal Docker network.
 2. **`.env` on the server** — set at minimum:
    ```bash
    APP_ORIGIN=https://vault.wickhub.cc
