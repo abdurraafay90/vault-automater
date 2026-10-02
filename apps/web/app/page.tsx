@@ -574,6 +574,12 @@ function getVaultEvmConfig(
 // loads; the live value always comes from the server's NATIVE_TOKEN_* env.
 const defaultTokenConfig: TokenConfig = { symbol: 'ZIG', denom: 'azig', decimals: 18 };
 
+// Gas price for ZIGChain Cosmos transactions, as a GasPrice.fromString()
+// amount — combined with the native denom (e.g. "2500000000azig"). Post-EVM-
+// migration value; the old price ("0.025uzig") does not carry over by simple
+// unit rescaling, this is the chain's actual new minimum gas price.
+const ZIG_GAS_PRICE_UNITS = '2500000000';
+
 const defaultIbcTransferConfig: IbcTransferConfig = {
   sourcePort: 'transfer',
   sourceChannel: 'channel-3',
@@ -2150,11 +2156,12 @@ export default function Home() {
         }
 
         // Gas is always paid in the chain's native denom, independent of the
-        // asset being transferred.
+        // asset being transferred. Price is post-EVM-migration azig (18 dec);
+        // ZIG_GAS_PRICE_UNITS is the "2500000000" piece, denom stays dynamic.
         const client = await SigningStargateClient.connectWithSigner(
           chainConfigRef.current.rpcUrl,
           signer,
-          { gasPrice: GasPrice.fromString(`0.025${nativeTokenRef.current.denom}`) }
+          { gasPrice: GasPrice.fromString(`${ZIG_GAS_PRICE_UNITS}${nativeTokenRef.current.denom}`) }
         );
 
         let txHash = '';

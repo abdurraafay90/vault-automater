@@ -40,6 +40,12 @@ export const EVM_GAS_SYMBOLS: Readonly<Record<EvmChainType, string>> = { erc: 'E
 // Noble USDC bridged over transfer/channel-3: SHA256("transfer/channel-3/uusdc").
 export const ZIGCHAIN_USDC_DENOM = 'ibc/6490A7EAB61059BFC1CDDEB05917DD70BDF3A611654162A1A47DB930D40D8AF4';
 
+// Gas price for ZIGChain Cosmos transactions, as a GasPrice.fromString()
+// amount — combined with the native denom (e.g. "2500000000azig"). Post-EVM-
+// migration value; the old price ("0.025uzig") does not carry over by simple
+// unit rescaling, this is the chain's actual new minimum gas price.
+export const ZIG_GAS_PRICE_UNITS = '2500000000';
+
 /**
  * The only assets automation may move. Decimals come from here, never from the
  * client: USDT/USDC are 6 decimals on Ethereum but 18 on BNB Smart Chain.

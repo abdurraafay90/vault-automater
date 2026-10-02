@@ -17,7 +17,7 @@ export const ZIG_TESTNET = {
   denom: 'azig',
   symbol: 'ZIG',
   decimals: 18,
-  gasPrice: '0.025azig',
+  gasPrice: '2500000000azig', // post-EVM-migration price, not a rescale of the old 0.025uzig
 } as const;
 
 type IbcTransferOptions = {

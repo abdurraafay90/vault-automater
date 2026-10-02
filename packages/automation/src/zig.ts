@@ -1,7 +1,7 @@
 import { DirectSecp256k1HdWallet, DirectSecp256k1Wallet, type EncodeObject, type OfflineSigner } from '@cosmjs/proto-signing';
 import { GasPrice, SigningStargateClient, coin } from '@cosmjs/stargate';
 import { formatBaseUnits, hexToBytes } from './amounts.js';
-import type { StablecoinAsset } from './chains.js';
+import { ZIG_GAS_PRICE_UNITS, type StablecoinAsset } from './chains.js';
 import { ExecutionError, type TransferResult } from './errors.js';
 
 const GAS_MULTIPLIER = 1.5;
@@ -86,7 +86,7 @@ export async function sendZigStablecoin(input: ZigTransferInput): Promise<Transf
   const who = `${account.address.slice(0, 8)}…${account.address.slice(-4)}`;
 
   const client = await SigningStargateClient.connectWithSigner(input.rpcUrl, signer, {
-    gasPrice: GasPrice.fromString(`0.025${gasDenom}`),
+    gasPrice: GasPrice.fromString(`${ZIG_GAS_PRICE_UNITS}${gasDenom}`),
   });
   try {
     const balance = BigInt((await client.getBalance(account.address, asset.denom)).amount);
